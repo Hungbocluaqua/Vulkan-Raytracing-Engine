@@ -740,12 +740,13 @@ void GpuScene::rebuildMaterialSamplerDescriptors(uint32_t slotCount) {
     }
 }
 
-bool GpuScene::setEnvironmentControls(bool enabled, float intensity, float rotation) {
+bool GpuScene::setEnvironmentControls(bool enabled, float intensity, float rotation, float backgroundIntensity) {
     const uint32_t enabledValue = enabled ? 1u : 0u;
     const bool changed =
         envParams_.enabled != enabledValue ||
         std::abs(envParams_.intensity - intensity) > 0.0001f ||
-        std::abs(envParams_.rotation - rotation) > 0.0001f;
+        std::abs(envParams_.rotation - rotation) > 0.0001f ||
+        std::abs(envParams_.backgroundIntensity - backgroundIntensity) > 0.0001f;
     if (!changed) {
         return false;
     }
@@ -753,6 +754,7 @@ bool GpuScene::setEnvironmentControls(bool enabled, float intensity, float rotat
     envParams_.enabled = enabledValue;
     envParams_.intensity = std::max(0.0f, intensity);
     envParams_.rotation = rotation;
+    envParams_.backgroundIntensity = std::max(0.0f, backgroundIntensity);
     uploadEnvironmentParams();
     return true;
 }
@@ -1957,6 +1959,8 @@ void GpuScene::createEnvironment(BufferUploader& uploader) {
         .rotation = 0.0f,
         .width = environment.width,
         .height = environment.height,
+        .backgroundIntensity = 0.35f,
+        .procedural = useExternalEnvironment ? 0u : 1u,
         .invTotalLum = importance.invTotalLuminance,
     };
     envParamsBuffer_ = std::make_unique<Buffer>(allocator_, BufferDesc{

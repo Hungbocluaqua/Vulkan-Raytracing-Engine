@@ -88,6 +88,7 @@ struct Environment {
     std::filesystem::path hdrPath;
     float intensity = 1.0f;
     float rotation = 0.0f;
+    float backgroundIntensity = 0.35f;
     bool enabled = true;
 };
 
@@ -95,6 +96,7 @@ struct RenderSettings {
     bool pathTracingEnabled = true;
     bool directLightingEnabled = true;
     uint32_t maxBounces = 8;
+    uint32_t environmentDirectSamples = 1;
     float exposure = 0.75f;
     bool sunlightEnabled = true;
     float sunIntensity = 1.0f;

@@ -27,6 +27,13 @@ enum class RendererDebugView : uint32_t {
     BsdfPdf = 18,
     MisWeight = 19,
     DirectSampleType = 20,
+    Albedo = 21,
+    ClayMaterial = 22,
+    FirstBounceThroughput = 23,
+    SecondaryEnvironmentMiss = 24,
+    BounceCount = 25,
+    SecondaryEnvironmentRadiance = 26,
+    WhiteEnvironmentTransport = 27,
 };
 
 struct RendererDebugParams {

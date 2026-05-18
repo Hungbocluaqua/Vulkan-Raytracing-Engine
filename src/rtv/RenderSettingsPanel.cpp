@@ -19,6 +19,7 @@ void RenderSettingsPanel::draw(EditorRuntimeState& state, EditorRequests& reques
         settings.pathTracingEnabled = render.pathTracingEnabled;
         settings.directLightingEnabled = render.directLightingEnabled;
         settings.maxBounces = render.maxBounces;
+        settings.environmentDirectSamples = render.environmentDirectSamples;
         settings.exposure = render.exposure;
         settings.sunlightEnabled = render.sunlightEnabled;
         settings.sunIntensity = render.sunIntensity;
@@ -34,10 +35,13 @@ void RenderSettingsPanel::draw(EditorRuntimeState& state, EditorRequests& reques
         settings.environmentEnabled = environment.enabled;
         settings.environmentIntensity = environment.intensity;
         settings.environmentRotation = environment.rotation;
+        settings.environmentBackgroundIntensity = environment.backgroundIntensity;
     }
     bool changed = false;
     uint32_t minBounces = 1;
     uint32_t maxBounces = 16;
+    uint32_t minEnvSamples = 1;
+    uint32_t maxEnvSamples = 8;
     uint32_t minAtrous = 1;
     uint32_t maxAtrous = 5;
 
@@ -58,8 +62,10 @@ void RenderSettingsPanel::draw(EditorRuntimeState& state, EditorRequests& reques
     }
     ImGui::Text("Active Backend: %s", rendererBackendDisplayName(state.renderer.activeBackend()));
     ImGui::Text("Hardware RT: %s", state.renderer.hardwareRayTracingAvailable() ? "Available" : "Unavailable");
+    editorDebugViewCombo("Debug View", settings, changed);
     changed |= ImGui::SliderFloat("Exposure", &settings.exposure, 0.05f, 4.0f, "%.2f");
     changed |= ImGui::SliderScalar("Max Bounces", ImGuiDataType_U32, &settings.maxBounces, &minBounces, &maxBounces);
+    changed |= ImGui::SliderScalar("Environment Samples", ImGuiDataType_U32, &settings.environmentDirectSamples, &minEnvSamples, &maxEnvSamples);
     changed |= ImGui::Checkbox("Path Tracing", &settings.pathTracingEnabled);
     changed |= ImGui::Checkbox("Direct Lighting", &settings.directLightingEnabled);
     changed |= ImGui::SliderFloat("Indirect Strength", &settings.indirectStrength, 0.0f, 4.0f, "%.2f");
@@ -74,6 +80,7 @@ void RenderSettingsPanel::draw(EditorRuntimeState& state, EditorRequests& reques
     ImGui::SeparatorText("Environment");
     changed |= ImGui::Checkbox("Environment", &settings.environmentEnabled);
     changed |= ImGui::SliderFloat("Environment Intensity", &settings.environmentIntensity, 0.0f, 8.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Background Intensity", &settings.environmentBackgroundIntensity, 0.0f, 2.0f, "%.2f");
     changed |= ImGui::SliderFloat("Environment Rotation", &settings.environmentRotation, -6.28318f, 6.28318f, "%.2f");
 
     ImGui::SeparatorText("Denoiser");
@@ -93,16 +100,19 @@ void RenderSettingsPanel::draw(EditorRuntimeState& state, EditorRequests& reques
             const bool environmentChanged =
                 environment.enabled != settings.environmentEnabled ||
                 std::abs(environment.intensity - settings.environmentIntensity) > 0.0001f ||
-                std::abs(environment.rotation - settings.environmentRotation) > 0.0001f;
+                std::abs(environment.rotation - settings.environmentRotation) > 0.0001f ||
+                std::abs(environment.backgroundIntensity - settings.environmentBackgroundIntensity) > 0.0001f;
             const bool lightingChanged =
                 render.sunlightEnabled != settings.sunlightEnabled ||
                 render.directLightingEnabled != settings.directLightingEnabled ||
+                render.environmentDirectSamples != settings.environmentDirectSamples ||
                 std::abs(render.sunIntensity - settings.sunIntensity) > 0.0001f ||
                 std::abs(render.skyIntensity - settings.skyIntensity) > 0.0001f ||
                 std::abs(render.sunAngularRadius - settings.sunAngularRadius) > 0.0001f;
             render.pathTracingEnabled = settings.pathTracingEnabled;
             render.directLightingEnabled = settings.directLightingEnabled;
             render.maxBounces = settings.maxBounces;
+            render.environmentDirectSamples = settings.environmentDirectSamples;
             render.exposure = settings.exposure;
             render.sunlightEnabled = settings.sunlightEnabled;
             render.sunIntensity = settings.sunIntensity;
@@ -118,6 +128,7 @@ void RenderSettingsPanel::draw(EditorRuntimeState& state, EditorRequests& reques
             environment.enabled = settings.environmentEnabled;
             environment.intensity = settings.environmentIntensity;
             environment.rotation = settings.environmentRotation;
+            environment.backgroundIntensity = settings.environmentBackgroundIntensity;
             const SceneUpdateKind kind = environmentChanged
                 ? SceneUpdateKind::EnvironmentOnly
                 : (lightingChanged ? SceneUpdateKind::LightOnly : SceneUpdateKind::CameraOnly);

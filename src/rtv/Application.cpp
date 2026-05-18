@@ -36,7 +36,7 @@ constexpr uint64_t largeSceneTriangleThreshold = 1'000'000ull;
 
 RendererDebugView nextDebugView(RendererDebugView view) {
     const uint32_t raw = static_cast<uint32_t>(view);
-    const uint32_t next = raw >= static_cast<uint32_t>(RendererDebugView::DirectSampleType) ? 0u : raw + 1u;
+    const uint32_t next = raw >= static_cast<uint32_t>(RendererDebugView::ClayMaterial) ? 0u : raw + 1u;
     return static_cast<RendererDebugView>(next);
 }
 
@@ -79,6 +79,7 @@ void syncDocumentRenderSettings(SceneDocument& document, const RendererSettings&
     render.pathTracingEnabled = settings.pathTracingEnabled;
     render.directLightingEnabled = settings.directLightingEnabled;
     render.maxBounces = settings.maxBounces;
+    render.environmentDirectSamples = settings.environmentDirectSamples;
     render.exposure = settings.exposure;
     render.sunlightEnabled = settings.sunlightEnabled;
     render.sunIntensity = settings.sunIntensity;
@@ -92,6 +93,9 @@ void syncDocumentRenderSettings(SceneDocument& document, const RendererSettings&
     render.resolutionScale = settings.renderResolutionScale;
     render.requestedBackend = settings.requestedBackend;
     document.setRenderSettings(render);
+    Environment environment = document.environment();
+    environment.backgroundIntensity = settings.environmentBackgroundIntensity;
+    document.setEnvironment(std::move(environment));
 }
 
 std::filesystem::path resolveProjectRoot() {

@@ -199,10 +199,14 @@ bool SceneDocument::saveJson(const std::filesystem::path& path) const {
     out << "  \"sourceGltf\": \"" << escapeJson(sourceGltfPath_.has_value() ? sourceGltfPath_->string() : "") << "\",\n";
     out << "  \"sourceHdr\": \"" << escapeJson(sourceHdrPath_.has_value() ? sourceHdrPath_->string() : "") << "\",\n";
     out << "  \"environment\": {\"hdrPath\":\"" << escapeJson(environment_.hdrPath.string()) << "\",\"intensity\":" << environment_.intensity
-        << ",\"rotation\":" << environment_.rotation << ",\"enabled\":" << (environment_.enabled ? "true" : "false") << "},\n";
+        << ",\"rotation\":" << environment_.rotation
+        << ",\"backgroundIntensity\":" << environment_.backgroundIntensity
+        << ",\"enabled\":" << (environment_.enabled ? "true" : "false") << "},\n";
     out << "  \"renderSettings\": {\"pathTracingEnabled\":" << (renderSettings_.pathTracingEnabled ? "true" : "false")
         << ",\"directLightingEnabled\":" << (renderSettings_.directLightingEnabled ? "true" : "false")
-        << ",\"maxBounces\":" << renderSettings_.maxBounces << ",\"exposure\":" << renderSettings_.exposure
+        << ",\"maxBounces\":" << renderSettings_.maxBounces
+        << ",\"environmentDirectSamples\":" << renderSettings_.environmentDirectSamples
+        << ",\"exposure\":" << renderSettings_.exposure
         << ",\"sunlightEnabled\":" << (renderSettings_.sunlightEnabled ? "true" : "false")
         << ",\"sunIntensity\":" << renderSettings_.sunIntensity
         << ",\"skyIntensity\":" << renderSettings_.skyIntensity
@@ -353,10 +357,12 @@ bool SceneDocument::loadJson(const std::filesystem::path& path) {
     environment_.enabled = boolAfter(json, "enabled", environment_.enabled);
     environment_.intensity = numberAfter(json, "intensity", environment_.intensity);
     environment_.rotation = numberAfter(json, "rotation", environment_.rotation);
+    environment_.backgroundIntensity = numberAfter(json, "backgroundIntensity", environment_.backgroundIntensity);
 
     renderSettings_.pathTracingEnabled = boolAfter(json, "pathTracingEnabled", renderSettings_.pathTracingEnabled);
     renderSettings_.directLightingEnabled = boolAfter(json, "directLightingEnabled", renderSettings_.directLightingEnabled);
     renderSettings_.maxBounces = uintAfter(json, "maxBounces", renderSettings_.maxBounces);
+    renderSettings_.environmentDirectSamples = uintAfter(json, "environmentDirectSamples", renderSettings_.environmentDirectSamples);
     renderSettings_.exposure = numberAfter(json, "exposure", renderSettings_.exposure);
     renderSettings_.sunlightEnabled = boolAfter(json, "sunlightEnabled", renderSettings_.sunlightEnabled);
     renderSettings_.sunIntensity = numberAfter(json, "sunIntensity", renderSettings_.sunIntensity);

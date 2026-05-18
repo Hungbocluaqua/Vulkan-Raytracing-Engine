@@ -18,6 +18,7 @@ SceneGpuBuildResult SceneToGpuSceneBuilder::build(
     result.rendererSettings.pathTracingEnabled = render.pathTracingEnabled;
     result.rendererSettings.directLightingEnabled = render.directLightingEnabled;
     result.rendererSettings.maxBounces = render.maxBounces;
+    result.rendererSettings.environmentDirectSamples = render.environmentDirectSamples;
     result.rendererSettings.exposure = render.exposure;
     result.rendererSettings.sunlightEnabled = render.sunlightEnabled;
     result.rendererSettings.sunIntensity = render.sunIntensity;
@@ -31,6 +32,7 @@ SceneGpuBuildResult SceneToGpuSceneBuilder::build(
     result.rendererSettings.environmentEnabled = environment.enabled;
     result.rendererSettings.environmentIntensity = environment.intensity;
     result.rendererSettings.environmentRotation = environment.rotation;
+    result.rendererSettings.environmentBackgroundIntensity = environment.backgroundIntensity;
     result.rendererSettings.renderResolutionScale = render.resolutionScale;
 
     for (const Entity* entity : document.registry().entities()) {

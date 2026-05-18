@@ -29,6 +29,8 @@ The port is operational: it opens a native window, runs a compute path tracer, c
 - Cornell-box scene and optional glTF/GLB import through `--gltf`
 - Radiance HDR environment loading through `--hdr`
 - Environment row/column CDF generation and shader-side importance sampling
+- Environment direct lighting / next-event estimation at every non-delta bounce, with a configurable per-hit environment sample count
+- Separate lighting controls for procedural sky intensity, loaded HDR environment intensity, and camera-visible background intensity
 - CPU BVH construction with Morton ordering, binned SAH, BVH4-style packed upload data, and rope traversal
 - Scene buffers for materials, primitives, mesh records, instance records, light records, local mesh data, local BVHs, and TLAS nodes
 - TLAS/instance traversal with flattened-BVH fallback and traversal mismatch debug mode
@@ -36,7 +38,7 @@ The port is operational: it opens a native window, runs a compute path tracer, c
 - Shader-side base-color, normal, metallic-roughness, and emissive texture sampling
 - Direct/emissive/environment lighting debug views plus PDF/MIS diagnostics
 - GPU timestamp profiling for path tracing, denoising, and fullscreen passes
-- ImGui overlay for renderer settings, HDR path loading, debug view switching, sample count, reset reason, resolution, and pass timings
+- ImGui overlay for renderer settings, HDR path loading, debug view switching, sample count, reset reason, resolution, environment direct sample count, and pass timings
 - WASD/mouse camera controls, pointer release on focus loss, and `F11` borderless fullscreen
 - Optional Vulkan hardware ray tracing backend using `VK_KHR_acceleration_structure` and `VK_KHR_ray_tracing_pipeline`
 - Backend selection through `--backend auto`, `--backend compute`, `--backend rt`, and the Render Settings panel
@@ -149,7 +151,15 @@ Performance note: the compute backend uses a project-specific packed BVH and may
 - `PageUp/PageDown` changes max bounces.
 - `Home/End` changes a-trous denoiser iterations.
 
-The ImGui overlay exposes the same core controls plus HDR path loading, profiler timing, hardware RT AS/SBT stats, sample count, resolution, debug view selection, and accumulation reset reason.
+The ImGui overlay exposes the same core controls plus HDR path loading, profiler timing, hardware RT AS/SBT stats, sample count, resolution, debug view selection, accumulation reset reason, and the environment lighting controls.
+
+Environment control behavior:
+
+- `Sky Intensity` controls the procedural fallback sky only.
+- `Environment Intensity` controls loaded HDR environment lighting only.
+- `Background Intensity` scales the camera-visible sky/background, so HDR lighting can be raised without immediately blowing out the visible sky.
+- `Environment Samples` controls direct environment-light samples per surface hit. `1` is the interactive default; higher values reduce sky-light noise at a proportional performance cost.
+- The procedural sky is uploaded through the same environment texture path as HDRs, but it is flagged separately on the GPU so it uses `Sky Intensity` instead of `Environment Intensity`.
 
 ## Debug Views
 
@@ -177,6 +187,13 @@ Supported debug views include:
 - `bsdf-pdf`
 - `mis-weight`
 - `direct-sample-type`
+- `albedo`
+- `clay`
+- `first-bounce-throughput`
+- `secondary-environment-miss`
+- `bounce-count`
+- `secondary-environment-radiance`
+- `white-environment-transport`
 
 ## Architecture
 
@@ -258,10 +275,3 @@ Recommended next work:
 5. Expand glTF material support and add hardware RT TLAS refit/rebuild paths for transform updates.
 6. Tune temporal reprojection and denoiser debug views against the WebGPU reference.
 7. Split mixed-material hardware RT meshes into opaque, alpha, and single-sided geometry classes so more triangles can use fast opaque traversal without losing glTF material correctness.
-#   V u l k a n - R a y t r a c i n g - E n g i n e 
- 
- #   V u l k a n - R a y t r a c i n g - E n g i n e 
- 
- #   V u l k a n - R a y t r a c i n g - E n g i n e 
- 
- 

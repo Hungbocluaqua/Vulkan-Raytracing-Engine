@@ -27,7 +27,9 @@ bool is_hdr_view(uint debugView) {
            debugView == 7u ||
            debugView == 8u ||
            debugView == 9u ||
-           debugView == 10u;
+           debugView == 10u ||
+           debugView == 22u ||
+           debugView == 27u;
 }
 
 void main() {

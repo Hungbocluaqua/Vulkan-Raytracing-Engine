@@ -320,6 +320,7 @@ bool PathTracerRenderer::applySettings(const RendererSettings& settings) {
     RendererSettings next = settings;
     next.maxBounces = std::clamp(next.maxBounces, 1u, 16u);
     next.atrousIterations = std::clamp(next.atrousIterations, 1u, 5u);
+    next.environmentDirectSamples = std::clamp(next.environmentDirectSamples, 1u, 8u);
     next.denoiserStrength = std::max(0.05f, next.denoiserStrength);
     next.sunIntensity = std::max(0.0f, next.sunIntensity);
     next.skyIntensity = std::max(0.0f, next.skyIntensity);
@@ -327,6 +328,7 @@ bool PathTracerRenderer::applySettings(const RendererSettings& settings) {
     next.sunAngularRadius = std::max(0.0f, next.sunAngularRadius);
     next.indirectStrength = std::max(0.0f, next.indirectStrength);
     next.environmentIntensity = std::max(0.0f, next.environmentIntensity);
+    next.environmentBackgroundIntensity = std::max(0.0f, next.environmentBackgroundIntensity);
     next.renderResolutionScale = std::clamp(next.renderResolutionScale, 0.25f, 1.0f);
     next.debugScale = std::max(0.05f, next.debugScale);
 
@@ -339,6 +341,7 @@ bool PathTracerRenderer::applySettings(const RendererSettings& settings) {
         next.environmentEnabled != settings_.environmentEnabled ||
         next.maxBounces != settings_.maxBounces ||
         next.atrousIterations != settings_.atrousIterations ||
+        next.environmentDirectSamples != settings_.environmentDirectSamples ||
         next.debugView != settings_.debugView ||
         std::abs(next.denoiserStrength - settings_.denoiserStrength) > 0.0001f ||
         std::abs(next.sunIntensity - settings_.sunIntensity) > 0.0001f ||
@@ -348,6 +351,7 @@ bool PathTracerRenderer::applySettings(const RendererSettings& settings) {
         std::abs(next.indirectStrength - settings_.indirectStrength) > 0.0001f ||
         std::abs(next.environmentIntensity - settings_.environmentIntensity) > 0.0001f ||
         std::abs(next.environmentRotation - settings_.environmentRotation) > 0.0001f ||
+        std::abs(next.environmentBackgroundIntensity - settings_.environmentBackgroundIntensity) > 0.0001f ||
         std::abs(next.renderResolutionScale - settings_.renderResolutionScale) > 0.0001f ||
         next.requestedBackend != settings_.requestedBackend ||
         std::abs(next.debugScale - settings_.debugScale) > 0.0001f;
@@ -358,10 +362,12 @@ bool PathTracerRenderer::applySettings(const RendererSettings& settings) {
     const bool environmentChanged =
         next.environmentEnabled != settings_.environmentEnabled ||
         std::abs(next.environmentIntensity - settings_.environmentIntensity) > 0.0001f ||
-        std::abs(next.environmentRotation - settings_.environmentRotation) > 0.0001f;
+        std::abs(next.environmentRotation - settings_.environmentRotation) > 0.0001f ||
+        std::abs(next.environmentBackgroundIntensity - settings_.environmentBackgroundIntensity) > 0.0001f;
     const bool lightingChanged =
         next.sunlightEnabled != settings_.sunlightEnabled ||
         next.directLightingEnabled != settings_.directLightingEnabled ||
+        next.environmentDirectSamples != settings_.environmentDirectSamples ||
         std::abs(next.sunIntensity - settings_.sunIntensity) > 0.0001f ||
         std::abs(next.skyIntensity - settings_.skyIntensity) > 0.0001f ||
         std::abs(next.sunAngularRadius - settings_.sunAngularRadius) > 0.0001f;
@@ -376,13 +382,18 @@ bool PathTracerRenderer::applySettings(const RendererSettings& settings) {
     const bool renderChanged =
         next.pathTracingEnabled != settings_.pathTracingEnabled ||
         next.maxBounces != settings_.maxBounces ||
+        next.environmentDirectSamples != settings_.environmentDirectSamples ||
         std::abs(next.exposure - settings_.exposure) > 0.0001f ||
         std::abs(next.indirectStrength - settings_.indirectStrength) > 0.0001f;
     const bool renderResolutionChanged =
         std::abs(next.renderResolutionScale - settings_.renderResolutionScale) > 0.0001f;
 
     settings_ = next;
-    const bool environmentUploaded = scene_.setEnvironmentControls(settings_.environmentEnabled, settings_.environmentIntensity, settings_.environmentRotation);
+    const bool environmentUploaded = scene_.setEnvironmentControls(
+        settings_.environmentEnabled,
+        settings_.environmentIntensity,
+        settings_.environmentRotation,
+        settings_.environmentBackgroundIntensity);
     if (renderResolutionChanged) {
         resetAccumulation(AccumulationResetReason::Resize);
     } else if (environmentChanged || environmentUploaded) {
@@ -445,7 +456,11 @@ void PathTracerRenderer::resetAccumulation(AccumulationResetReason reason) {
 void PathTracerRenderer::loadEnvironment(const std::filesystem::path& path) {
     checkVk(vkDeviceWaitIdle(context_.device()), "vkDeviceWaitIdle(load environment)");
     scene_.loadEnvironment(uploader_, path);
-    scene_.setEnvironmentControls(settings_.environmentEnabled, settings_.environmentIntensity, settings_.environmentRotation);
+    scene_.setEnvironmentControls(
+        settings_.environmentEnabled,
+        settings_.environmentIntensity,
+        settings_.environmentRotation,
+        settings_.environmentBackgroundIntensity);
     resetAccumulation(AccumulationResetReason::EnvironmentChanged);
 }
 
@@ -586,6 +601,7 @@ void PathTracerRenderer::updateCamera() {
     camera_.directLightingEnabled = settings_.directLightingEnabled ? 1u : 0u;
     camera_.sunAngularRadius = settings_.sunAngularRadius;
     camera_.indirectStrength = settings_.indirectStrength;
+    camera_.environmentDirectSamples = settings_.environmentDirectSamples;
     camera_.frameCount = frameCount_;
     cameraBuffer_.write(&camera_, sizeof(camera_));
     cameraBuffer_.flush(sizeof(camera_));

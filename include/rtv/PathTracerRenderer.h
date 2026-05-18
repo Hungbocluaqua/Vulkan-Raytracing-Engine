@@ -40,6 +40,7 @@ struct RendererSettings {
     bool environmentEnabled = true;
     uint32_t maxBounces = 8;
     uint32_t atrousIterations = 4;
+    uint32_t environmentDirectSamples = 1;
     float denoiserStrength = 1.0f;
     float sunIntensity = 1.0f;
     float skyIntensity = 0.8f;
@@ -48,6 +49,7 @@ struct RendererSettings {
     float indirectStrength = 1.0f;
     float environmentIntensity = 1.0f;
     float environmentRotation = 0.0f;
+    float environmentBackgroundIntensity = 0.35f;
     float renderResolutionScale = 1.0f;
     RendererBackend requestedBackend = RendererBackend::Auto;
     RendererDebugView debugView = RendererDebugView::Beauty;

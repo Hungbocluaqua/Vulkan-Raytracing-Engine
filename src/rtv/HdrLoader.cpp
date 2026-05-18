@@ -51,9 +51,9 @@ HdrImageData HdrLoader::createProcedural(uint32_t width, uint32_t height) {
         const float dirY = std::sin(lat);
         const float skyT = std::pow(std::max(dirY, 0.0f), 0.35f);
         for (uint32_t x = 0; x < result.width; ++x) {
-            const float r = 0.38f * (1.0f - skyT) + 0.16f * skyT;
-            const float g = 0.48f * (1.0f - skyT) + 0.30f * skyT;
-            const float b = 0.62f * (1.0f - skyT) + 0.78f * skyT;
+            const float r = 0.70f * (1.0f - skyT) + 0.56f * skyT;
+            const float g = 0.74f * (1.0f - skyT) + 0.68f * skyT;
+            const float b = 0.80f * (1.0f - skyT) + 0.92f * skyT;
             const size_t idx = (static_cast<size_t>(y) * result.width + x) * 4u;
             result.rgba[idx + 0] = r;
             result.rgba[idx + 1] = g;

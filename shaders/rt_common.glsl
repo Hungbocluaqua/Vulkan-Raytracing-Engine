@@ -19,7 +19,7 @@ layout(set = 0, binding = 1, std140) uniform Camera {
     float fov_y;
     float sun_angular_radius;
     float indirect_strength;
-    float _padding0;
+    uint environment_direct_samples;
 } camera;
 
 layout(set = 0, binding = 2, std430) buffer VarianceBuffer { uint variance_buffer[]; };
@@ -63,8 +63,8 @@ layout(set = 0, binding = 16, std140) uniform EnvParams {
     float rotation;
     uint width;
     uint height;
-    uint _pad0;
-    float _pad1;
+    float background_intensity;
+    uint procedural;
     float _pad2;
     float inv_total_lum;
 } env_params;
@@ -179,6 +179,7 @@ const uint ALPHA_MODE_OPAQUE = 0u;
 const uint ALPHA_MODE_MASK = 1u;
 const uint ALPHA_MODE_BLEND = 2u;
 const float SHADOW_SELF_HIT_EPSILON = 0.001;
+const float DEBUG_WHITE_ENV_RADIANCE = 4.0;
 
 uint pack_unorm2x16(vec2 v) {
     uint x = uint(round(clamp(v.x, 0.0, 1.0) * 65535.0));
@@ -338,15 +339,34 @@ vec3 apply_normal_texture(Material material, vec2 uv, vec3 normal, vec3 tangent,
     return dot(mapped, rayDirection) > 0.0 ? -mapped : mapped;
 }
 
+Material apply_debug_material_mode(Material material) {
+    if (debug_params.view == 22u || debug_params.view == 27u) {
+        material.color = vec3(0.72, 0.70, 0.66);
+        material.roughness = 0.85;
+        material.metallic = 0.0;
+        material.mat_type = 0u;
+        material.emissive = vec3(0.0);
+    }
+    return material;
+}
+
+vec3 rotate_y(vec3 v, float angle);
+vec2 env_uv_from_dir(vec3 dir);
+
 vec3 environment_color(vec3 direction) {
+    if (debug_params.view == 27u) {
+        return vec3(DEBUG_WHITE_ENV_RADIANCE);
+    }
     if (env_params.enabled != 0u && env_params.width > 1u && env_params.height > 1u) {
-        float phi = atan(direction.z, direction.x) + env_params.rotation;
-        float u = fract(phi / (2.0 * PI) + 0.5);
-        float v = clamp(acos(clamp(direction.y, -1.0, 1.0)) / PI, 0.0, 1.0);
-        return texture(sampler2D(env_map, env_sampler), vec2(u, v)).rgb * env_params.intensity;
+        vec3 localDir = rotate_y(direction, env_params.rotation);
+        vec2 uv = env_uv_from_dir(localDir);
+        float scale = env_params.procedural != 0u ? camera.sky_intensity : env_params.intensity;
+        return texture(sampler2D(env_map, env_sampler), vec2(fract(uv.x), clamp(uv.y, 0.0, 1.0))).rgb *
+            scale * env_params.background_intensity;
     }
     float t = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-    return mix(vec3(0.06, 0.07, 0.08), vec3(0.35, 0.45, 0.65), t) * camera.sky_intensity;
+    return mix(vec3(0.70, 0.74, 0.80), vec3(0.56, 0.68, 0.92), t) *
+        camera.sky_intensity * env_params.background_intensity;
 }
 
 vec3 rotate_y(vec3 v, float angle) {
@@ -356,21 +376,19 @@ vec3 rotate_y(vec3 v, float angle) {
 }
 
 vec2 env_uv_from_dir(vec3 dir) {
-    float phi = atan(dir.z, dir.x);
-    float u = fract(phi / (2.0 * PI) + 0.5);
-    float v = clamp(acos(clamp(dir.y, -1.0, 1.0)) / PI, 0.0, 1.0);
-    return vec2(u, v);
+    vec3 d = normalize(dir);
+    return vec2(atan(d.z, d.x) / (2.0 * PI) + 0.5, asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
 }
 
 vec3 env_dir_from_uv(vec2 uv) {
     float phi = (uv.x - 0.5) * 2.0 * PI;
-    float theta = uv.y * PI;
-    float sinTheta = sin(theta);
-    return normalize(vec3(cos(phi) * sinTheta, cos(theta), sin(phi) * sinTheta));
+    float lat = (uv.y - 0.5) * PI;
+    float cosLat = cos(lat);
+    return normalize(vec3(cosLat * cos(phi), sin(lat), cosLat * sin(phi)));
 }
 
 vec3 analytical_sun_direction() {
-    return normalize(vec3(-0.45, 0.82, 0.32));
+    return rotate_y(normalize(vec3(-0.55057, 0.82812, -0.10531)), -env_params.rotation);
 }
 
 vec3 analytical_sun_center_radiance() {
@@ -393,14 +411,24 @@ vec3 analytical_sun_radiance(vec3 dir) {
 }
 
 vec3 environment_radiance(vec3 dir) {
+    if (debug_params.view == 27u) {
+        return vec3(DEBUG_WHITE_ENV_RADIANCE);
+    }
     if (env_params.enabled != 0u) {
         vec3 localDir = rotate_y(dir, env_params.rotation);
         vec2 uv = env_uv_from_dir(localDir);
         vec3 sampled = texture(sampler2D(env_map, env_sampler), vec2(fract(uv.x), clamp(uv.y, 0.0, 1.0))).rgb;
-        return sampled * env_params.intensity * camera.sky_intensity + analytical_sun_radiance(dir);
+        float scale = env_params.procedural != 0u ? camera.sky_intensity : env_params.intensity;
+        return sampled * scale + analytical_sun_radiance(dir);
     }
     float t = 0.5 * (dir.y + 1.0);
-    return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t) * camera.sky_intensity + analytical_sun_radiance(dir);
+    return mix(vec3(0.70, 0.74, 0.80), vec3(0.56, 0.68, 0.92), t) * camera.sky_intensity + analytical_sun_radiance(dir);
+}
+
+vec3 debug_display_tonemap(vec3 color) {
+    color = max(color, vec3(0.0));
+    color = color / (color + vec3(1.0));
+    return pow(color, vec3(1.0 / 2.2));
 }
 
 float environment_pdf(vec3 dir) {
@@ -451,7 +479,8 @@ vec3 sample_environment_direction(inout uint state, out vec3 out_dir, out float 
     uint col = colLo;
     vec2 uv = vec2((float(col) + 0.5) / float(env_params.width), (float(row) + 0.5) / float(env_params.height));
     out_dir = rotate_y(env_dir_from_uv(uv), -env_params.rotation);
-    vec3 radiance = texelFetch(sampler2D(env_map, env_sampler), ivec2(int(col), int(row)), 0).rgb * env_params.intensity;
+    float scale = env_params.procedural != 0u ? camera.sky_intensity : env_params.intensity;
+    vec3 radiance = texelFetch(sampler2D(env_map, env_sampler), ivec2(int(col), int(row)), 0).rgb * scale;
     out_pdf = environment_pdf(out_dir);
     return radiance;
 }

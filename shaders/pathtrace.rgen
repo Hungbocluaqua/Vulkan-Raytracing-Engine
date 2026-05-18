@@ -17,6 +17,10 @@ struct PathComponents {
     float first_bsdf_pdf;
     float first_mis_weight;
     uint first_direct_sample_type;
+    vec3 first_bounce_throughput;
+    float secondary_env_miss;
+    vec3 secondary_env_radiance;
+    uint bounce_count;
     uint instance_id;
     uint mesh_id;
 };
@@ -85,7 +89,7 @@ Material material_for_hit(inout RayPayload hit, vec3 rayDirection) {
     Material material = decode_material(hit.material_id);
     apply_material_textures(material, hit.uv);
     hit.normal = apply_normal_texture(material, hit.uv, hit.normal, hit.tangent, hit.bitangent, rayDirection);
-    return material;
+    return apply_debug_material_mode(material);
 }
 
 bool sample_emissive_light(inout uint rng, vec3 hitPos, out vec3 wi, out vec3 emission, out float pdfSolidAngle, out float distanceToLight) {
@@ -182,7 +186,7 @@ vec3 estimate_direct_lighting(
     sampledMisWeight = 0.0;
     sampledType = 0u;
     bool isDelta = material.mat_type == 1u || material.mat_type == 2u;
-    if (camera.direct_lighting_enabled == 0u || isDelta) {
+    if (camera.direct_lighting_enabled == 0u || isDelta || debug_params.view == 27u) {
         return vec3(0.0);
     }
 
@@ -206,10 +210,14 @@ vec3 estimate_direct_lighting(
         }
     }
 
-    vec3 envDir;
-    float envPdf;
-    vec3 envRadiance = sample_environment_direction(rng, envDir, envPdf) * camera.sky_intensity;
-    if (envPdf > 0.0) {
+    uint envSampleCount = clamp(camera.environment_direct_samples, 1u, 8u);
+    for (uint envSample = 0u; envSample < envSampleCount; ++envSample) {
+        vec3 envDir;
+        float envPdf;
+        vec3 envRadiance = sample_environment_direction(rng, envDir, envPdf);
+        if (envPdf <= 0.0) {
+            continue;
+        }
         float cosSurface = max(dot(lightingNormal, envDir), 0.0);
         if (cosSurface > 0.0 && !trace_shadow(shadow_origin(hit, envDir), envDir, 10000.0)) {
             vec3 bsdf = eval_brdf(material, wo, envDir, lightingNormal);
@@ -221,9 +229,10 @@ vec3 estimate_direct_lighting(
                 sampledMisWeight = weight;
                 sampledType = 2u;
             }
-            environmentContribution = bsdf * envRadiance * cosSurface * weight / max(envPdf, 1e-6);
+            environmentContribution += bsdf * envRadiance * cosSurface * weight / max(envPdf, 1e-6);
         }
     }
+    environmentContribution /= float(envSampleCount);
 
     vec3 sunContribution = vec3(0.0);
     if (camera.sunlight_enabled != 0u) {
@@ -258,6 +267,10 @@ vec3 trace_path(Ray ray, inout uint rng, out bool did_hit, out float first_depth
     components.first_bsdf_pdf = 0.0;
     components.first_mis_weight = 0.0;
     components.first_direct_sample_type = 0u;
+    components.first_bounce_throughput = vec3(0.0);
+    components.secondary_env_miss = 0.0;
+    components.secondary_env_radiance = vec3(0.0);
+    components.bounce_count = 0u;
     components.instance_id = 0xffffffffu;
     components.mesh_id = 0xffffffffu;
 
@@ -274,8 +287,11 @@ vec3 trace_path(Ray ray, inout uint rng, out bool did_hit, out float first_depth
         RayPayload hit = trace_surface(ray.origin, ray.direction, 0.001, 10000.0);
         if (hit.hit == 0u) {
             vec3 sky = environment_radiance(ray.direction);
+            if (bounce == 0u) {
+                sky *= env_params.background_intensity;
+            }
             vec3 env = throughput * sky;
-            if (previousWasBrdfSample && env_params.enabled != 0u) {
+            if (previousWasBrdfSample && env_params.enabled != 0u && debug_params.view != 27u) {
                 float envPdf = environment_pdf(ray.direction);
                 if (envPdf > 1e-6) {
                     env = throughput * sky * power_heuristic(previousBrdfPdf, envPdf);
@@ -288,6 +304,7 @@ vec3 trace_path(Ray ray, inout uint rng, out bool did_hit, out float first_depth
             components.environment_light += env;
             break;
         }
+        components.bounce_count += 1u;
 
         Material material = material_for_hit(hit, ray.direction);
         if (bounce == 0u) {
@@ -299,6 +316,21 @@ vec3 trace_path(Ray ray, inout uint rng, out bool did_hit, out float first_depth
             components.first_roughness = material.roughness;
             components.instance_id = hit.instance_id;
             components.mesh_id = hit.mesh_id;
+        }
+
+        if (bounce == 0u && debug_params.view == 24u) {
+            float testPdf;
+            vec3 testDir = sample_cosine_hemisphere(rng, hit.normal, testPdf);
+            RayPayload testHit = trace_surface(hit.world_pos + hit.normal * SHADOW_SELF_HIT_EPSILON, normalize(testDir), 0.001, 10000.0);
+            components.secondary_env_miss = testHit.hit == 0u ? 1.0 : 0.0;
+            return vec3(components.secondary_env_miss);
+        }
+        if (bounce == 0u && debug_params.view == 26u) {
+            float testPdf;
+            vec3 testDir = sample_cosine_hemisphere(rng, hit.normal, testPdf);
+            RayPayload testHit = trace_surface(hit.world_pos + hit.normal * SHADOW_SELF_HIT_EPSILON, normalize(testDir), 0.001, 10000.0);
+            components.secondary_env_radiance = testHit.hit == 0u ? environment_radiance(normalize(testDir)) : vec3(0.0);
+            return debug_display_tonemap(components.secondary_env_radiance);
         }
 
         if (length(material.emissive) > 0.0) {
@@ -364,6 +396,9 @@ vec3 trace_path(Ray ray, inout uint rng, out bool did_hit, out float first_depth
             }
             ray.origin = hit.world_pos + hit.normal * SHADOW_SELF_HIT_EPSILON;
             throughput *= material.color * camera.indirect_strength;
+            if (bounce == 0u) {
+                components.first_bounce_throughput = throughput;
+            }
         } else if (material.mat_type == 2u) {
             float refractionRatio = hit.front_face != 0u ? (1.0 / max(material.ior, 1.01)) : max(material.ior, 1.01);
             vec3 unitDirection = normalize(ray.direction);
@@ -376,6 +411,9 @@ vec3 trace_path(Ray ray, inout uint rng, out bool did_hit, out float first_depth
             ray.direction = normalize(scatteredDirection);
             ray.origin = hit.world_pos + (dot(ray.direction, hit.normal) > 0.0 ? hit.normal : -hit.normal) * SHADOW_SELF_HIT_EPSILON;
             throughput *= material.color * camera.indirect_strength;
+            if (bounce == 0u) {
+                components.first_bounce_throughput = throughput;
+            }
         } else {
             float bsdfPdf;
             vec3 wi = sample_brdf(rng, material, wo, hit.normal, bsdfPdf);
@@ -390,9 +428,12 @@ vec3 trace_path(Ray ray, inout uint rng, out bool did_hit, out float first_depth
             previousBrdfPdf = bsdfPdf;
             previousSampleOrigin = ray.origin;
             throughput *= bsdf * cosTheta / max(bsdfPdf, 1e-6) * camera.indirect_strength;
+            if (bounce == 0u) {
+                components.first_bounce_throughput = throughput;
+            }
         }
 
-        if (bounce > 2u) {
+        if (bounce > 2u && debug_params.view != 27u) {
             float p = clamp(max(max(throughput.r, throughput.g), throughput.b), 0.05, 0.95);
             if (rand_f32(rng) > p) {
                 break;
@@ -481,12 +522,23 @@ void main() {
         output_value = components.first_direct_sample_type == 1u
             ? vec3(1.0, 0.45, 0.05)
             : (components.first_direct_sample_type == 2u ? vec3(0.05, 0.45, 1.0) : vec3(0.0));
+    } else if (debug_params.view == 21u) {
+        output_value = did_hit ? components.first_albedo : vec3(0.0);
+    } else if (debug_params.view == 23u) {
+        output_value = components.first_bounce_throughput;
+    } else if (debug_params.view == 24u) {
+        output_value = vec3(components.secondary_env_miss);
+    } else if (debug_params.view == 25u) {
+        output_value = vec3(float(components.bounce_count) / max(float(camera.max_bounces), 1.0));
+    } else if (debug_params.view == 26u) {
+        output_value = debug_display_tonemap(components.secondary_env_radiance);
     }
     if (debug_params.view == 0u ||
         debug_params.view == 7u ||
         debug_params.view == 8u ||
         debug_params.view == 9u ||
-        debug_params.view == 10u) {
+        debug_params.view == 10u ||
+        debug_params.view == 22u) {
         output_value *= max(camera.exposure, 0.0);
     }
     imageStore(output_color, ivec2(pixel), vec4(output_value, 1.0));

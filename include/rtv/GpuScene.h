@@ -36,7 +36,7 @@ struct CameraUniform {
     float fovY = 60.0f * 0.017453292519943295f;
     float sunAngularRadius = 0.0093f;
     float indirectStrength = 1.0f;
-    float padding0 = 0.0f;
+    uint32_t environmentDirectSamples = 1;
 };
 
 struct MeshParamsUniform {
@@ -102,8 +102,8 @@ struct EnvParamsUniform {
     float rotation = 0.0f;
     uint32_t width = 1;
     uint32_t height = 1;
-    uint32_t pad0 = 0;
-    float pad1 = 0.0f;
+    float backgroundIntensity = 0.35f;
+    uint32_t procedural = 1;
     float pad2 = 0.0f;
     float invTotalLum = 1.0f;
     float pad3 = 0.0f;
@@ -186,7 +186,7 @@ public:
     [[nodiscard]] const std::vector<RayTracingMeshBuildInput>& rayTracingMeshes() const { return rayTracingMeshes_; }
     [[nodiscard]] const std::vector<RayTracingInstanceBuildInput>& rayTracingInstances() const { return rayTracingInstances_; }
 
-    bool setEnvironmentControls(bool enabled, float intensity, float rotation);
+    bool setEnvironmentControls(bool enabled, float intensity, float rotation, float backgroundIntensity);
     void loadEnvironment(BufferUploader& uploader, const std::filesystem::path& path);
     bool updateImportedMaterials(BufferUploader& uploader, const SceneAsset& importedScene, const AssetManager& assets);
 

@@ -43,6 +43,24 @@ RendererDebugView parseRendererDebugView(std::string_view value) {
     if (key == "bsdfpdf" || key == "brdfpdf") { return RendererDebugView::BsdfPdf; }
     if (key == "mis" || key == "misweight") { return RendererDebugView::MisWeight; }
     if (key == "directsample" || key == "directsampletype" || key == "sampletype") { return RendererDebugView::DirectSampleType; }
+    if (key == "albedo" || key == "basecolor" || key == "basecolour") { return RendererDebugView::Albedo; }
+    if (key == "clay" || key == "claymaterial" || key == "balancedclay" || key == "balancedclaymaterial" ||
+        key == "white" || key == "whitematerial" || key == "whitematerialmode") {
+        return RendererDebugView::ClayMaterial;
+    }
+    if (key == "firstbounce" || key == "firstbouncethroughput" || key == "throughput" || key == "firstbounceweight") {
+        return RendererDebugView::FirstBounceThroughput;
+    }
+    if (key == "secondaryenvmiss" || key == "secondaryenvironmentmiss" || key == "envmiss" || key == "skyescape") {
+        return RendererDebugView::SecondaryEnvironmentMiss;
+    }
+    if (key == "bouncecount" || key == "bounces") { return RendererDebugView::BounceCount; }
+    if (key == "secondaryenvradiance" || key == "secondaryenvironmentradiance" || key == "envradiance") {
+        return RendererDebugView::SecondaryEnvironmentRadiance;
+    }
+    if (key == "whiteenv" || key == "whiteenvironment" || key == "whiteenvironmenttransport" || key == "whitetransport") {
+        return RendererDebugView::WhiteEnvironmentTransport;
+    }
     return RendererDebugView::Beauty;
 }
 
@@ -69,6 +87,13 @@ const char* rendererDebugViewName(RendererDebugView view) {
     case RendererDebugView::BsdfPdf: return "bsdf-pdf";
     case RendererDebugView::MisWeight: return "mis-weight";
     case RendererDebugView::DirectSampleType: return "direct-sample-type";
+    case RendererDebugView::Albedo: return "albedo";
+    case RendererDebugView::ClayMaterial: return "clay-material";
+    case RendererDebugView::FirstBounceThroughput: return "first-bounce-throughput";
+    case RendererDebugView::SecondaryEnvironmentMiss: return "secondary-environment-miss";
+    case RendererDebugView::BounceCount: return "bounce-count";
+    case RendererDebugView::SecondaryEnvironmentRadiance: return "secondary-environment-radiance";
+    case RendererDebugView::WhiteEnvironmentTransport: return "white-environment-transport";
     }
     return "beauty";
 }
