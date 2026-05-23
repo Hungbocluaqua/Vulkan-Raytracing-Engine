@@ -38,6 +38,16 @@ constexpr int initialWidth = 1280;
 constexpr int initialHeight = 720;
 constexpr uint64_t largeSceneTriangleThreshold = 1'000'000ull;
 
+constexpr RendererDebugView intermediateViews[] = {
+    RendererDebugView::Beauty,
+    RendererDebugView::DirectLighting,
+    RendererDebugView::IndirectLighting,
+    RendererDebugView::Variance,
+    RendererDebugView::Normals,
+    RendererDebugView::Depth,
+    RendererDebugView::MotionVectors,
+};
+
 RendererDebugView nextDebugView(RendererDebugView view) {
     const uint32_t raw = static_cast<uint32_t>(view);
     const uint32_t next = raw >= static_cast<uint32_t>(RendererDebugView::RestirReservoirM) ? 0u : raw + 1u;
@@ -689,15 +699,6 @@ void Application::applyEditorRequests(const EditorRequests& requests, bool allow
         }
         if (requests.cycleIntermediateView) {
             RendererSettings settings = pathTracer_->settings();
-            static const RendererDebugView intermediateViews[] = {
-                RendererDebugView::Beauty,
-                RendererDebugView::DirectLighting,
-                RendererDebugView::IndirectLighting,
-                RendererDebugView::Variance,
-                RendererDebugView::Normals,
-                RendererDebugView::Depth,
-                RendererDebugView::MotionVectors,
-            };
             constexpr int count = sizeof(intermediateViews) / sizeof(intermediateViews[0]);
             int idx = 0;
             for (int i = 0; i < count; ++i) {
@@ -1200,15 +1201,6 @@ void Application::processRuntimeControls(float deltaSeconds) {
         changed = true;
     }
     if (!shortcutsBlocked && pressedOnce(GLFW_KEY_F7)) {
-        static const RendererDebugView intermediateViews[] = {
-            RendererDebugView::Beauty,
-            RendererDebugView::DirectLighting,
-            RendererDebugView::IndirectLighting,
-            RendererDebugView::Variance,
-            RendererDebugView::Normals,
-            RendererDebugView::Depth,
-            RendererDebugView::MotionVectors,
-        };
         constexpr int count = sizeof(intermediateViews) / sizeof(intermediateViews[0]);
         int idx = 0;
         for (int i = 0; i < count; ++i) {

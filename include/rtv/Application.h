@@ -2,6 +2,7 @@
 
 #include "rtv/NonCopyable.h"
 #include "rtv/RendererDebug.h"
+#include "rtv/RendererSettings.h"
 #include "rtv/AssetManager.h"
 #include "rtv/CameraController.h"
 #include "rtv/EditorPanels.h"
@@ -30,10 +31,6 @@ class ResourceDemo;
 class PipelineDemo;
 class PathTracerRenderer;
 class Swapchain;
-class UiOverlay;
-class UploadContext;
-class VulkanContext;
-struct RendererSettings;
 
 class Application final : private NonCopyable {
 public:

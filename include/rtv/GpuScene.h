@@ -223,6 +223,7 @@ private:
     void uploadLightBvh(BufferUploader& uploader, const std::vector<GpuLightRecord>& lightRecords);
     void destroyMaterialTextureSamplers();
     void rebuildMaterialSamplerDescriptors(uint32_t slotCount);
+    [[nodiscard]] static uint32_t textureSlotIndexFor(const SceneAsset& scene, TextureAssetHandle texture, uint32_t maxSlots);
 
     ResourceAllocator& allocator_;
     std::optional<std::filesystem::path> environmentPath_;

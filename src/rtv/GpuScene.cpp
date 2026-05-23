@@ -1046,19 +1046,8 @@ bool GpuScene::updateImportedMaterials(BufferUploader& uploader, const SceneAsse
     }
 
     const std::vector<TextureColorUsage> textureUsage = classifyTextureUsage(importedScene, assets);
-    auto textureSlotIndexFor = [&](TextureAssetHandle texture) -> uint32_t {
-        if (!texture.valid()) {
-            return UINT32_MAX;
-        }
-        for (uint32_t slot = 0; slot < importedScene.textures.size() && slot < maxMaterialTextures; ++slot) {
-            if (importedScene.textures[slot].index == texture.index) {
-                return slot;
-            }
-        }
-        return UINT32_MAX;
-    };
     auto textureSlotFor = [&](TextureAssetHandle texture) {
-        const uint32_t slot = textureSlotIndexFor(texture);
+        const uint32_t slot = GpuScene::textureSlotIndexFor(importedScene, texture, maxMaterialTextures);
         return slot == UINT32_MAX ? -1.0f : static_cast<float>(slot);
     };
 
@@ -1503,19 +1492,8 @@ void GpuScene::createImportedScene(BufferUploader& uploader, const SceneAsset& i
         materialHandles.push_back(MaterialAssetHandle{0});
     }
     const std::vector<TextureColorUsage> textureUsage = classifyTextureUsage(importedScene, assets);
-    auto textureSlotIndexFor = [&](TextureAssetHandle texture) -> uint32_t {
-        if (!texture.valid()) {
-            return UINT32_MAX;
-        }
-        for (uint32_t slot = 0; slot < importedScene.textures.size() && slot < maxMaterialTextures; ++slot) {
-            if (importedScene.textures[slot].index == texture.index) {
-                return slot;
-            }
-        }
-        return UINT32_MAX;
-    };
     auto textureSlotFor = [&](TextureAssetHandle texture) {
-        const uint32_t slot = textureSlotIndexFor(texture);
+        const uint32_t slot = GpuScene::textureSlotIndexFor(importedScene, texture, maxMaterialTextures);
         return slot == UINT32_MAX ? -1.0f : static_cast<float>(slot);
     };
 
@@ -2281,6 +2259,18 @@ void GpuScene::uploadLightBvh(BufferUploader& uploader, const std::vector<GpuLig
         packed.data(),
         sizeof(glm::vec4) * packed.size(),
         "scene light bvh nodes");
+}
+
+uint32_t GpuScene::textureSlotIndexFor(const SceneAsset& scene, TextureAssetHandle texture, uint32_t maxSlots) {
+    if (!texture.valid()) {
+        return UINT32_MAX;
+    }
+    for (uint32_t slot = 0; slot < scene.textures.size() && slot < maxSlots; ++slot) {
+        if (scene.textures[slot].index == texture.index) {
+            return slot;
+        }
+    }
+    return UINT32_MAX;
 }
 
 } // namespace rtv
