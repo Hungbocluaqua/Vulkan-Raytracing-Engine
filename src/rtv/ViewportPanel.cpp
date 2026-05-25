@@ -4,7 +4,6 @@
 #include "rtv/CameraController.h"
 #include "rtv/RendererDebug.h"
 #include "rtv/SceneOperations.h"
-#include "rtv/SunController.h"
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
@@ -158,7 +157,7 @@ void drawSelectedLightOverlay(
     const glm::mat4& view,
     const glm::mat4& projection,
     const Entity& entity) {
-    if (!entity.light.has_value() && !entity.sun.has_value()) {
+    if (!entity.light.has_value()) {
         return;
     }
 
@@ -166,9 +165,6 @@ void drawSelectedLightOverlay(
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     const glm::mat4 world = entityWorldMatrix(state.sceneDocument->registry(), entity);
     glm::vec3 center = glm::vec3(world[3]);
-    if (entity.sun.has_value() && state.camera != nullptr && glm::dot(center, center) <= 1.0e-6f) {
-        center = state.camera->position() + SunController::derivedState(*state.sceneDocument).direction * 100.0f;
-    }
     const glm::vec3 viewCenter = glm::vec3(view * glm::vec4(center, 1.0f));
     const std::optional<ImVec2> screenCenter = projectViewToScreen(state, projection, viewCenter, nearPlane);
     if (!screenCenter.has_value()) {
@@ -178,16 +174,6 @@ void drawSelectedLightOverlay(
     drawList->AddCircle(*screenCenter, 8.0f, IM_COL32(255, 214, 80, 255), 24, 2.0f);
     drawList->AddLine(ImVec2(screenCenter->x - 10.0f, screenCenter->y), ImVec2(screenCenter->x + 10.0f, screenCenter->y), IM_COL32(255, 214, 80, 220), 2.0f);
     drawList->AddLine(ImVec2(screenCenter->x, screenCenter->y - 10.0f), ImVec2(screenCenter->x, screenCenter->y + 10.0f), IM_COL32(255, 214, 80, 220), 2.0f);
-
-    if (entity.sun.has_value()) {
-        const glm::vec3 direction = SunController::derivedState(*state.sceneDocument).direction;
-        const glm::vec3 tip = center - direction * 5.0f;
-        const std::optional<ImVec2> screenTip = projectViewToScreen(state, projection, glm::vec3(view * glm::vec4(tip, 1.0f)), nearPlane);
-        if (screenTip.has_value()) {
-            drawList->AddLine(*screenCenter, *screenTip, IM_COL32(255, 244, 120, 220), 2.0f);
-        }
-        return;
-    }
 
     const Light& light = *entity.light;
     if (light.type == LightType::Point) {
@@ -237,26 +223,9 @@ void drawSelectionOverlay(const EditorRuntimeState& state, const EditorSelection
     }
     const glm::mat4 view = editorViewMatrix(*state.camera);
     const glm::mat4 projection = editorProjectionMatrix(activeCameraFov(*state.sceneDocument), viewportAspect(state));
-    if (entity->light.has_value() || entity->sun.has_value()) {
+    if (entity->light.has_value()) {
         drawSelectedLightOverlay(state, view, projection, *entity);
     }
-}
-
-void drawPrimarySunOverlay(const EditorRuntimeState& state, const EditorSelection& selection) {
-    if (state.sceneDocument == nullptr || state.camera == nullptr) {
-        return;
-    }
-    const EntityId sunId = SunController::primarySunEntity(*state.sceneDocument);
-    if (!sunId.valid() || sunId == selection.entityId()) {
-        return;
-    }
-    const Entity* entity = state.sceneDocument->registry().entity(sunId);
-    if (entity == nullptr || !entity->sun.has_value()) {
-        return;
-    }
-    const glm::mat4 view = editorViewMatrix(*state.camera);
-    const glm::mat4 projection = editorProjectionMatrix(activeCameraFov(*state.sceneDocument), viewportAspect(state));
-    drawSelectedLightOverlay(state, view, projection, *entity);
 }
 
 void drawGridOverlay(const EditorRuntimeState& state, const CameraController& camera) {
@@ -514,7 +483,6 @@ void ViewportPanel::draw(EditorRuntimeState& state, EditorSelection& selection, 
             }
         }
 
-        drawPrimarySunOverlay(state, selection);
         drawSelectionOverlay(state, selection);
 
         if (state.camera != nullptr) {

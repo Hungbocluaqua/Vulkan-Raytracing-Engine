@@ -1,0 +1,2117 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_GOOGLE_include_directive : require
+
+#include "atmosphere_phase.glsl"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer AccumulationBuffer { vec4 accumulation_buffer[]; };
+
+layout(set = 0, binding = 1, std140) uniform Camera {
+    vec4 pos;
+    vec4 forward;
+    vec4 right;
+    vec4 up;
+    uint frame_count;
+    float sun_intensity;
+    float sky_intensity;
+    float exposure;
+    uint path_tracing_enabled;
+    uint max_bounces;
+    uint sunlight_enabled;
+    uint direct_lighting_enabled;
+    float fov_y;
+    float sun_angular_radius;
+    float indirect_strength;
+    uint environment_direct_samples;
+    vec4 jitter;
+    vec4 atmosphere;
+} camera;
+
+layout(set = 0, binding = 2, std430) buffer VarianceBuffer { uint variance_buffer[]; };
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D output_color;
+layout(set = 0, binding = 4, std430) buffer DepthNormalBuffer { uvec2 depth_normal_buffer[]; };
+layout(set = 0, binding = 5, std430) buffer WorldPositionBuffer { uvec2 world_position_buffer[]; };
+layout(set = 0, binding = 33, std430) buffer EntityIdBuffer { uint entity_id_buffer[]; };
+layout(set = 0, binding = 34, std430) buffer VelocityBuffer { uint velocity_buffer[]; };
+layout(set = 0, binding = 35, std140) uniform PrevCamera {
+    mat4 view_proj;
+    mat4 inv_view_proj;
+    mat4 prev_view_proj;
+    vec4 current_pos;
+    vec4 prev_pos;
+    vec4 jitter;
+} prev_camera;
+struct RestirReservoir {
+    uvec4 metadata; // x = direct sample type, y = age, z = valid, w = reserved
+    vec4 sample_value_confidence; // rgb = selected/direct contribution, a = confidence
+    vec4 target_pdf_weight_sum_m; // x = target/light pdf, y = weight sum luminance, z = M, w = reserved
+};
+layout(set = 0, binding = 36, std430) buffer RestirReservoirBuffer { RestirReservoir restir_reservoirs[]; };
+layout(set = 0, binding = 37, std430) readonly buffer PreviousRestirReservoirBuffer { RestirReservoir previous_restir_reservoirs[]; };
+layout(set = 0, binding = 6, std430) readonly buffer MeshVertices { vec4 mesh_vertices[]; };
+layout(set = 0, binding = 7, std430) readonly buffer MeshIndices { uint mesh_indices[]; };
+layout(set = 0, binding = 8, std430) readonly buffer BvhNodes { vec4 bvh_nodes[]; };
+layout(set = 0, binding = 9, std430) readonly buffer TriangleData { vec4 triangle_data[]; };
+layout(set = 0, binding = 10, std430) readonly buffer MeshMaterials { vec4 mesh_materials[]; };
+
+layout(set = 0, binding = 11, std140) uniform MeshParams {
+    uint vertex_count;
+    uint triangle_count;
+    uint bvh_node_count;
+    uint material_count;
+    uint enabled;
+    uint sphere_count;
+    uint primitive_count;
+    uint instance_count;
+    uint light_count;
+    float emissive_total_area;
+    uint mesh_count;
+    uint local_vertex_count;
+    uint local_index_count;
+    uint local_bvh_node_count;
+    uint local_triangle_count;
+    uint tlas_node_count;
+    uint tlas_instance_index_count;
+    uint _padding2;
+    uint _padding3;
+    uint _padding4;
+    uint _padding5;
+    uint _padding6;
+} mesh_params;
+
+layout(set = 0, binding = 12) uniform texture2D env_map;
+layout(set = 0, binding = 13) uniform sampler env_sampler;
+layout(set = 0, binding = 14, std430) readonly buffer EnvAliasRows { vec2 env_alias_rows[]; };
+layout(set = 0, binding = 15, std430) readonly buffer EnvAliasCols { vec2 env_alias_cols[]; };
+
+layout(set = 0, binding = 16, std140) uniform EnvParams {
+    uint enabled;
+    float intensity;
+    float rotation;
+    uint width;
+    uint height;
+    float background_intensity;
+    uint procedural;
+    float _pad2;
+    float inv_total_lum;
+} env_params;
+
+layout(set = 0, binding = 17, std430) readonly buffer SceneSpheres { vec4 scene_spheres[]; };
+layout(set = 0, binding = 18, std140) uniform RendererDebug {
+    uint view;
+    uint flags;
+    uint selected_instance;
+    float scale;
+} debug_params;
+layout(set = 0, binding = 19) uniform texture2D material_textures[128];
+layout(set = 0, binding = 23) uniform sampler material_samplers[128];
+
+struct PrimitiveRecord {
+    uvec4 index_data;
+    uvec4 metadata;
+};
+
+struct InstanceRecord {
+    mat4 transform;
+    mat4 inverse_transform;
+    mat4 prev_transform;
+    uvec4 metadata;
+};
+
+layout(set = 0, binding = 21, std430) readonly buffer ScenePrimitiveRecords {
+    PrimitiveRecord primitive_records[];
+};
+
+layout(set = 0, binding = 22, std430) readonly buffer SceneInstanceRecords {
+    InstanceRecord instance_records[];
+};
+
+struct LightRecord {
+    uvec4 metadata;
+    vec4 data0;
+    vec4 data1;
+    vec4 data2;
+    vec4 data3;
+};
+
+layout(set = 0, binding = 24, std430) readonly buffer SceneLightRecords {
+    LightRecord light_records[];
+};
+
+struct MeshRecord {
+    uvec4 vertex_index_data;
+    uvec4 primitive_data;
+    uvec4 bvh_data;
+    uvec4 flags;
+};
+
+layout(set = 0, binding = 25, std430) readonly buffer SceneMeshRecords {
+    MeshRecord mesh_records[];
+};
+
+struct LocalVertex {
+    vec4 position_uv_x;
+    vec4 normal_uv_y;
+    vec4 tangent;
+};
+
+layout(set = 0, binding = 26, std430) readonly buffer LocalMeshVertices {
+    LocalVertex local_mesh_vertices[];
+};
+
+layout(set = 0, binding = 27, std430) readonly buffer LocalMeshIndices {
+    uint local_mesh_indices[];
+};
+
+struct InstanceBoundsRecord {
+    vec4 bmin;
+    vec4 bmax;
+};
+
+layout(set = 0, binding = 28, std430) readonly buffer SceneInstanceBounds {
+    InstanceBoundsRecord instance_bounds[];
+};
+
+layout(set = 0, binding = 29, std430) readonly buffer LocalBvhNodes {
+    vec4 local_bvh_nodes[];
+};
+
+layout(set = 0, binding = 30, std430) readonly buffer LocalTriangleData {
+    vec4 local_triangle_data[];
+};
+
+layout(set = 0, binding = 31, std430) readonly buffer TlasNodes {
+    vec4 tlas_nodes[];
+};
+
+layout(set = 0, binding = 32, std430) readonly buffer TlasInstanceIndices {
+    uint tlas_instance_indices[];
+};
+
+layout(set = 1, binding = 0) uniform texture2D atmosphere_transmittance_lut;
+layout(set = 1, binding = 1) uniform texture2D atmosphere_sky_view_lut;
+layout(set = 1, binding = 2) uniform sampler atmosphere_sampler;
+layout(set = 1, binding = 3) uniform texture2D atmosphere_aerial_perspective_lut;
+layout(set = 1, binding = 4) uniform texture2D atmosphere_multi_scatter_lut;
+
+const float PI = 3.14159265358979323846;
+const uint TRI_STRIDE = 12u;
+const uint MATERIAL_STRIDE = 5u;
+const int MATERIAL_TEXTURE_LIMIT = 128;
+const uint MATERIAL_FLAG_MANUAL_BASE_COLOR_SRGB = 1u << 0u;
+const uint MATERIAL_FLAG_MANUAL_EMISSIVE_SRGB = 1u << 1u;
+const uint ALPHA_MODE_OPAQUE = 0u;
+const uint ALPHA_MODE_MASK = 1u;
+const uint ALPHA_MODE_BLEND = 2u;
+const float SHADOW_SELF_HIT_EPSILON = 0.001;
+const float DEBUG_WHITE_ENV_RADIANCE = 4.0;
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Material {
+    vec3 color;
+    float roughness;
+    float ior;
+    uint mat_type;
+    float metallic;
+    float pad2;
+    vec3 emissive;
+    float alpha_factor;
+    int base_color_texture;
+    int normal_texture;
+    int metallic_roughness_texture;
+    int emissive_texture;
+    float alpha_cutoff;
+    uint alpha_mode;
+    uint double_sided;
+};
+
+struct HitRecord {
+    float t;
+    vec3 p;
+    vec3 local_p;
+    vec3 normal;
+    vec3 light_normal;
+    Material material;
+    bool hit;
+    bool front_face;
+    vec2 uv;
+    uint traversal_steps;
+    uint bvh_depth;
+    uint instance_id;
+    uint mesh_id;
+    uint tlas_steps;
+};
+
+struct PathComponents {
+    vec3 direct_light;
+    vec3 indirect_light;
+    vec3 emissive_light;
+    vec3 environment_light;
+    vec3 restir_initial_direct_light;
+    vec3 first_albedo;
+    float first_roughness;
+    float first_light_pdf;
+    float first_bsdf_pdf;
+    float first_mis_weight;
+    uint first_direct_sample_type;
+    vec3 first_bounce_throughput;
+    float secondary_env_miss;
+    vec3 secondary_env_radiance;
+    vec3 first_local_pos;
+    uint bounce_count;
+    uint traversal_steps;
+    uint bvh_depth;
+    uint instance_id;
+    uint mesh_id;
+    uint tlas_steps;
+};
+
+uint rng_state;
+bool picking_ray = false;
+
+uint pcg_hash(uint inputValue) {
+    uint state = inputValue * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+vec3 id_color(uint id) {
+    uint h = pcg_hash(id + 1u);
+    return vec3(
+        float(h & 255u) / 255.0,
+        float((h >> 8u) & 255u) / 255.0,
+        float((h >> 16u) & 255u) / 255.0);
+}
+
+float rand_f32() {
+    rng_state = pcg_hash(rng_state);
+    return float(rng_state) / float(0xffffffffu);
+}
+
+vec3 rand_in_unit_sphere() {
+    for (int i = 0; i < 64; ++i) {
+        vec3 p = vec3(rand_f32(), rand_f32(), rand_f32()) * 2.0 - 1.0;
+        if (dot(p, p) < 1.0) {
+            return p;
+        }
+    }
+    return vec3(0.0, 1.0, 0.0);
+}
+
+vec3 rand_unit_vector() {
+    return normalize(rand_in_unit_sphere());
+}
+
+uint pack_unorm2x16(vec2 v) {
+    uint x = uint(round(clamp(v.x, 0.0, 1.0) * 65535.0));
+    uint y = uint(round(clamp(v.y, 0.0, 1.0) * 65535.0));
+    return x | (y << 16u);
+}
+
+uint pack_snorm2x16(vec2 v) {
+    return pack_unorm2x16(v * 0.5 + vec2(0.5));
+}
+
+uint encode_octahedral_normal(vec3 n) {
+    float denom = abs(n.x) + abs(n.y) + abs(n.z) + 1e-8;
+    vec2 p = n.xy / denom;
+    if (n.z < 0.0) {
+        p = (vec2(1.0) - abs(p.yx)) * sign(p);
+    }
+    return pack_snorm2x16(p);
+}
+
+uvec2 pack_depth_normal(float depth, vec3 normal) {
+    return uvec2(floatBitsToUint(depth), encode_octahedral_normal(normal));
+}
+
+uint pack_variance(float v) {
+    return pack_unorm2x16(vec2(clamp(v / 64.0, 0.0, 1.0), 0.0));
+}
+
+uvec2 pack_world_position(vec3 world_pos) {
+    vec3 relative = clamp((world_pos - camera.pos.xyz) / 8.0, vec3(-1.0), vec3(1.0));
+    return uvec2(pack_snorm2x16(relative.xy), pack_snorm2x16(vec2(relative.z, 0.0)));
+}
+
+vec2 project_unjittered_to_pixels(mat4 viewProj, vec2 jitterPixels, vec3 worldPos, ivec2 dims) {
+    vec4 clip = viewProj * vec4(worldPos, 1.0);
+    if (clip.w <= 0.0) {
+        return vec2(-1.0);
+    }
+    vec2 invDims = 1.0 / vec2(max(dims, ivec2(1)));
+    clip.xy -= jitterPixels * 2.0 * invDims * clip.w;
+    vec3 ndc = clip.xyz / clip.w;
+    if (ndc.z < 0.0 || ndc.z > 1.0001) {
+        return vec2(-1.0);
+    }
+    return vec2(
+        (ndc.x * 0.5 + 0.5) * float(dims.x) - 0.5,
+        (ndc.y * 0.5 + 0.5) * float(dims.y) - 0.5);
+}
+
+uint pack_velocity_pixels(vec2 velocityPixels) {
+    return pack_snorm2x16(velocityPixels / 64.0);
+}
+
+vec2 restir_unpack_unorm2x16(uint packedValue) {
+    return vec2(float(packedValue & 0xffffu), float((packedValue >> 16u) & 0xffffu)) / 65535.0;
+}
+
+vec2 restir_unpack_velocity_pixels(uint packedVelocity) {
+    return (restir_unpack_unorm2x16(packedVelocity) * 2.0 - vec2(1.0)) * 64.0;
+}
+
+uint restir_mode() {
+    return uint(clamp(camera.atmosphere.y, 0.0, 2.0));
+}
+
+bool temporal_history_available() {
+    return camera.atmosphere.z > 0.5;
+}
+
+RestirReservoir empty_restir_reservoir() {
+    RestirReservoir reservoir;
+    reservoir.metadata = uvec4(0u);
+    reservoir.sample_value_confidence = vec4(0.0);
+    reservoir.target_pdf_weight_sum_m = vec4(0.0);
+    return reservoir;
+}
+
+uint compute_surface_velocity(vec3 currentWorldPos, vec3 localPos, uint instanceId, ivec2 dims) {
+    vec3 previousWorldPos = currentWorldPos;
+    if (instanceId < mesh_params.instance_count) {
+        InstanceRecord instance = instance_records[instanceId];
+        previousWorldPos = (instance.prev_transform * vec4(localPos, 1.0)).xyz;
+    }
+
+    vec2 currentPos = project_unjittered_to_pixels(prev_camera.view_proj, prev_camera.jitter.xy, currentWorldPos, dims);
+    vec2 previousPos = project_unjittered_to_pixels(prev_camera.prev_view_proj, prev_camera.jitter.zw, previousWorldPos, dims);
+    bool valid = currentPos.x >= -0.5 && currentPos.y >= -0.5 &&
+        currentPos.x <= float(dims.x) - 0.5 && currentPos.y <= float(dims.y) - 0.5 &&
+        previousPos.x >= -0.5 && previousPos.y >= -0.5 &&
+        previousPos.x <= float(dims.x) - 0.5 && previousPos.y <= float(dims.y) - 0.5;
+    return valid ? pack_velocity_pixels(currentPos - previousPos) : 0u;
+}
+
+uint compute_sky_velocity(vec3 rayDir, ivec2 dims) {
+    vec3 currentWorldPos = prev_camera.current_pos.xyz + normalize(rayDir) * 512.0;
+    vec3 previousWorldPos = prev_camera.prev_pos.xyz + normalize(rayDir) * 512.0;
+    vec2 currentPos = project_unjittered_to_pixels(prev_camera.view_proj, prev_camera.jitter.xy, currentWorldPos, dims);
+    vec2 previousPos = project_unjittered_to_pixels(prev_camera.prev_view_proj, prev_camera.jitter.zw, previousWorldPos, dims);
+    bool valid = currentPos.x >= -0.5 && currentPos.y >= -0.5 &&
+        currentPos.x <= float(dims.x) - 0.5 && currentPos.y <= float(dims.y) - 0.5 &&
+        previousPos.x >= -0.5 && previousPos.y >= -0.5 &&
+        previousPos.x <= float(dims.x) - 0.5 && previousPos.y <= float(dims.y) - 0.5;
+    return valid ? pack_velocity_pixels(currentPos - previousPos) : 0u;
+}
+
+void store_initial_restir_reservoir(uint pixelIndex, ivec2 coords, ivec2 dims, uint packedVelocity, PathComponents components) {
+    if (restir_mode() == 0u) {
+        restir_reservoirs[pixelIndex] = empty_restir_reservoir();
+        return;
+    }
+
+    bool valid = components.first_direct_sample_type != 0u && components.first_light_pdf > 1.0e-6;
+    vec3 sampleValue = valid ? max(components.restir_initial_direct_light, vec3(0.0)) : vec3(0.0);
+    float sampleLum = dot(sampleValue, vec3(0.2126, 0.7152, 0.0722));
+    RestirReservoir current;
+    current.metadata = uvec4(components.first_direct_sample_type, 0u, valid ? 1u : 0u, 0u);
+    current.sample_value_confidence = vec4(sampleValue, valid ? 1.0 : 0.0);
+    current.target_pdf_weight_sum_m = vec4(
+        valid ? components.first_light_pdf : 0.0,
+        sampleLum,
+        valid ? 1.0 : 0.0,
+        0.0);
+
+    if (!valid) {
+        restir_reservoirs[pixelIndex] = current;
+        return;
+    }
+
+    vec2 velocityPixels = restir_unpack_velocity_pixels(packedVelocity);
+    vec2 historyPos = vec2(coords) - velocityPixels;
+    bool historyOnscreen = temporal_history_available() &&
+        historyPos.x >= 0.0 && historyPos.y >= 0.0 &&
+        historyPos.x < float(dims.x) && historyPos.y < float(dims.y);
+
+    if (!historyOnscreen) {
+        current.sample_value_confidence.a = temporal_history_available() ? 0.35 : 1.0;
+        restir_reservoirs[pixelIndex] = current;
+        return;
+    }
+
+    ivec2 historyCoords = clamp(ivec2(round(historyPos)), ivec2(0), dims - ivec2(1));
+    uint historyIndex = uint(historyCoords.y) * uint(dims.x) + uint(historyCoords.x);
+    RestirReservoir previous = previous_restir_reservoirs[historyIndex];
+    bool previousValid = previous.metadata.z != 0u &&
+        previous.target_pdf_weight_sum_m.z > 0.0 &&
+        previous.sample_value_confidence.a > 0.0;
+    if (!previousValid) {
+        current.sample_value_confidence.a = 0.35;
+        restir_reservoirs[pixelIndex] = current;
+        return;
+    }
+
+    float currentPdf = max(current.target_pdf_weight_sum_m.x, 1.0e-6);
+    float previousPdf = max(previous.target_pdf_weight_sum_m.x, 1.0e-6);
+    float motionConfidence = 1.0 - clamp(length(velocityPixels) / 24.0, 0.0, 0.75);
+    float motionCap = mix(0.85, 0.10, 1.0 - motionConfidence);
+    float previousWeight = clamp(previousPdf / (currentPdf + previousPdf), 0.0, motionCap);
+    float currentWeight = 1.0 - previousWeight;
+
+    current.metadata.y = min(previous.metadata.y + 1u, 255u);
+    current.sample_value_confidence.rgb =
+        current.sample_value_confidence.rgb * currentWeight +
+        previous.sample_value_confidence.rgb * previousWeight;
+    current.sample_value_confidence.a = clamp(
+        (currentWeight + previous.sample_value_confidence.a * previousWeight) * motionConfidence,
+        0.0,
+        1.0);
+    current.target_pdf_weight_sum_m.y =
+        current.target_pdf_weight_sum_m.y * currentWeight +
+        previous.target_pdf_weight_sum_m.y * previousWeight;
+    current.target_pdf_weight_sum_m.z = min(current.target_pdf_weight_sum_m.z + previous.target_pdf_weight_sum_m.z, 64.0);
+    restir_reservoirs[pixelIndex] = current;
+}
+
+uint first_scene_table_primitive_count() {
+    if (mesh_params.instance_count == 0u) {
+        return 0u;
+    }
+    return instance_records[0].metadata.z;
+}
+
+uint first_mesh_record_primitive_count() {
+    if (mesh_params.mesh_count == 0u) {
+        return 0u;
+    }
+    return mesh_records[0].primitive_data.y;
+}
+
+uint first_scene_table_triangle_count() {
+    if (mesh_params.primitive_count == 0u) {
+        return 0u;
+    }
+    return primitive_records[0].metadata.y;
+}
+
+float first_local_geometry_tint() {
+    if (mesh_params.local_vertex_count == 0u || mesh_params.local_index_count == 0u) {
+        return 0.0;
+    }
+    uint firstIndex = local_mesh_indices[0];
+    LocalVertex firstVertex = local_mesh_vertices[min(firstIndex, mesh_params.local_vertex_count - 1u)];
+    float positionTint = abs(firstVertex.position_uv_x.x) + abs(firstVertex.position_uv_x.y) + abs(firstVertex.position_uv_x.z);
+    float normalTint = abs(firstVertex.normal_uv_y.x) + abs(firstVertex.normal_uv_y.y) + abs(firstVertex.normal_uv_y.z);
+    return clamp((positionTint + normalTint) / 40.0, 0.0, 0.08);
+}
+
+float first_instance_bounds_tint() {
+    if (mesh_params.instance_count == 0u) {
+        return 0.0;
+    }
+    InstanceBoundsRecord bounds = instance_bounds[0];
+    vec3 extent = max(bounds.bmax.xyz - bounds.bmin.xyz, vec3(0.0));
+    return clamp((extent.x + extent.y + extent.z) / 96.0, 0.0, 0.06);
+}
+
+float first_mesh_bvh_tint() {
+    if (mesh_params.mesh_count == 0u || mesh_params.local_bvh_node_count == 0u || mesh_params.local_triangle_count == 0u) {
+        return 0.0;
+    }
+    MeshRecord mesh = mesh_records[0];
+    if (mesh.bvh_data.y == 0u || mesh.bvh_data.w == 0u) {
+        return 0.0;
+    }
+    uint nodeBase = min(mesh.bvh_data.x * 4u, (mesh_params.local_bvh_node_count - 1u) * 4u);
+    uint triBase = min(mesh.bvh_data.z * TRI_STRIDE, (mesh_params.local_triangle_count - 1u) * TRI_STRIDE);
+    vec3 boundsMin = local_bvh_nodes[nodeBase + 0u].xyz;
+    vec3 boundsMax = local_bvh_nodes[nodeBase + 1u].xyz;
+    vec3 triNormal = abs(local_triangle_data[triBase + 3u].xyz);
+    vec3 extent = max(boundsMax - boundsMin, vec3(0.0));
+    return clamp((extent.x + extent.y + extent.z + triNormal.x + triNormal.y + triNormal.z) / 128.0, 0.0, 0.07);
+}
+
+Material decode_material(uint mat_idx) {
+    uint idx = mat_idx * MATERIAL_STRIDE;
+    vec4 d0 = mesh_materials[idx + 0u];
+    vec4 d1 = mesh_materials[idx + 1u];
+    vec4 d2 = mesh_materials[idx + 2u];
+    vec4 d3 = mesh_materials[idx + 3u];
+    vec4 d4 = mesh_materials[idx + 4u];
+    Material m;
+    m.color = d0.xyz;
+    m.roughness = d0.w;
+    m.ior = d1.x;
+    m.mat_type = uint(d1.y);
+    m.metallic = d1.z;
+    m.pad2 = d1.w;
+    m.emissive = d2.xyz;
+    m.alpha_factor = d2.w;
+    m.base_color_texture = int(round(d3.x));
+    m.normal_texture = int(round(d3.y));
+    m.metallic_roughness_texture = int(round(d3.z));
+    m.emissive_texture = int(round(d3.w));
+    m.alpha_cutoff = d4.x;
+    m.alpha_mode = uint(round(d4.y));
+    m.double_sided = uint(round(d4.z));
+    return m;
+}
+
+Material decode_sphere_material(uint i) {
+    uint base = i * 4u;
+    vec4 d1 = scene_spheres[base + 1u];
+    vec4 d2 = scene_spheres[base + 2u];
+    vec4 d3 = scene_spheres[base + 3u];
+    Material m;
+    m.color = d1.xyz;
+    m.roughness = d1.w;
+    m.ior = d2.x;
+    m.mat_type = uint(d2.y);
+    m.metallic = d2.z;
+    m.pad2 = d2.w;
+    m.emissive = d3.xyz;
+    m.alpha_factor = 1.0;
+    m.base_color_texture = -1;
+    m.normal_texture = -1;
+    m.metallic_roughness_texture = -1;
+    m.emissive_texture = -1;
+    m.alpha_cutoff = 0.5;
+    m.alpha_mode = ALPHA_MODE_OPAQUE;
+    m.double_sided = 0u;
+    return m;
+}
+
+void apply_material_textures(inout Material material, vec2 uv) {
+    uint flags = uint(round(material.pad2));
+    if (material.base_color_texture >= 0 && material.base_color_texture < MATERIAL_TEXTURE_LIMIT) {
+        int textureIndex = material.base_color_texture;
+        vec4 base = texture(sampler2D(material_textures[nonuniformEXT(textureIndex)], material_samplers[nonuniformEXT(textureIndex)]), uv);
+        vec3 baseColor = (flags & MATERIAL_FLAG_MANUAL_BASE_COLOR_SRGB) != 0u
+            ? pow(max(base.rgb, vec3(0.0)), vec3(2.2))
+            : base.rgb;
+        material.color *= baseColor;
+        material.alpha_factor *= base.a;
+    }
+    if (material.metallic_roughness_texture >= 0 && material.metallic_roughness_texture < MATERIAL_TEXTURE_LIMIT) {
+        int textureIndex = material.metallic_roughness_texture;
+        vec4 mr = texture(sampler2D(material_textures[nonuniformEXT(textureIndex)], material_samplers[nonuniformEXT(textureIndex)]), uv);
+        material.roughness = clamp(material.roughness * mr.g, 0.02, 1.0);
+        material.metallic = clamp(material.metallic * mr.b, 0.0, 1.0);
+        if (material.mat_type == 0u || material.mat_type == 3u) {
+            material.mat_type = 3u;
+        }
+    }
+    if (material.emissive_texture >= 0 && material.emissive_texture < MATERIAL_TEXTURE_LIMIT) {
+        int textureIndex = material.emissive_texture;
+        vec4 emissive = texture(sampler2D(material_textures[nonuniformEXT(textureIndex)], material_samplers[nonuniformEXT(textureIndex)]), uv);
+        vec3 emissiveColor = (flags & MATERIAL_FLAG_MANUAL_EMISSIVE_SRGB) != 0u
+            ? pow(max(emissive.rgb, vec3(0.0)), vec3(2.2))
+            : emissive.rgb;
+        material.emissive *= emissiveColor;
+    }
+}
+
+bool accept_material_alpha(Material material) {
+    if (material.alpha_mode == ALPHA_MODE_MASK) {
+        return material.alpha_factor >= material.alpha_cutoff;
+    }
+    if (material.alpha_mode == ALPHA_MODE_BLEND) {
+        if (picking_ray) {
+            return material.alpha_factor >= 0.5;
+        }
+        return rand_f32() <= clamp(material.alpha_factor, 0.0, 1.0);
+    }
+    return true;
+}
+
+vec3 apply_normal_texture(Material material, vec2 uv, vec3 normal, vec3 tangent, vec3 bitangent, vec3 rayDirection) {
+    if (material.normal_texture < 0 || material.normal_texture >= MATERIAL_TEXTURE_LIMIT) {
+        return normal;
+    }
+    int textureIndex = material.normal_texture;
+    vec3 tangentSample = texture(sampler2D(material_textures[nonuniformEXT(textureIndex)], material_samplers[nonuniformEXT(textureIndex)]), uv).xyz * 2.0 - 1.0;
+    vec3 t = normalize(tangent - normal * dot(normal, tangent));
+    vec3 b = normalize(bitangent - normal * dot(normal, bitangent));
+    vec3 mapped = normalize(t * tangentSample.x + b * tangentSample.y + normal * max(tangentSample.z, 0.0));
+    return dot(mapped, rayDirection) > 0.0 ? -mapped : mapped;
+}
+
+Material apply_debug_material_mode(Material material) {
+    if (debug_params.view == 22u || debug_params.view == 27u) {
+        material.color = vec3(0.72, 0.70, 0.66);
+        material.roughness = 0.85;
+        material.metallic = 0.0;
+        material.mat_type = 0u;
+        material.emissive = vec3(0.0);
+    }
+    return material;
+}
+
+bool intersect_aabb(Ray ray, vec3 bmin, vec3 bmax, float t_min, float t_max) {
+    for (int axis = 0; axis < 3; ++axis) {
+        if (abs(ray.direction[axis]) < 1.0e-8) {
+            if (ray.origin[axis] < bmin[axis] || ray.origin[axis] > bmax[axis]) {
+                return false;
+            }
+            continue;
+        }
+        float invD = 1.0 / ray.direction[axis];
+        float t0 = (bmin[axis] - ray.origin[axis]) * invD;
+        float t1 = (bmax[axis] - ray.origin[axis]) * invD;
+        if (invD < 0.0) {
+            float tmp = t0;
+            t0 = t1;
+            t1 = tmp;
+        }
+        t_min = max(t0, t_min);
+        t_max = min(t1, t_max);
+        if (t_max < t_min) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool intersect_triangle(Ray ray, vec3 v0, vec3 v1, vec3 v2, float tMin, float tMax, out float t, out vec3 normal, out vec3 barycentric) {
+    vec3 e1 = v1 - v0;
+    vec3 e2 = v2 - v0;
+    vec3 p = cross(ray.direction, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-8) {
+        return false;
+    }
+    float invDet = 1.0 / det;
+    vec3 s = ray.origin - v0;
+    float u = dot(s, p) * invDet;
+    if (u < 0.0 || u > 1.0) {
+        return false;
+    }
+    vec3 q = cross(s, e1);
+    float v = dot(ray.direction, q) * invDet;
+    if (v < 0.0 || u + v > 1.0) {
+        return false;
+    }
+    t = dot(e2, q) * invDet;
+    if (t < tMin || t > tMax) {
+        return false;
+    }
+    barycentric = vec3(1.0 - u - v, u, v);
+    normal = normalize(cross(e1, e2));
+    if (dot(normal, ray.direction) > 0.0) {
+        normal = -normal;
+    }
+    return true;
+}
+
+HitRecord hit_bvh(Ray ray, float t_min, float closest_so_far) {
+    HitRecord best;
+    best.t = closest_so_far;
+    best.hit = false;
+    best.traversal_steps = 0u;
+    best.bvh_depth = 0u;
+    best.instance_id = 0xffffffffu;
+    best.mesh_id = 0xffffffffu;
+    best.tlas_steps = 0u;
+    best.light_normal = vec3(0.0, 1.0, 0.0);
+    if (mesh_params.enabled == 0u || mesh_params.bvh_node_count == 0u) {
+        return best;
+    }
+
+    uint node_idx = 0u;
+    uint current_depth = 0u;
+    for (uint guard = 0u; guard < 2048u && node_idx < mesh_params.bvh_node_count; ++guard) {
+        best.traversal_steps = guard + 1u;
+        uint b = node_idx * 4u;
+        vec4 d0 = bvh_nodes[b + 0u];
+        vec4 d1 = bvh_nodes[b + 1u];
+        vec4 d2 = bvh_nodes[b + 2u];
+        vec4 d3 = bvh_nodes[b + 3u];
+        bool is_leaf = d0.w > 0.5;
+        uint rope = uint(d1.w);
+
+        if (!intersect_aabb(ray, d0.xyz, d1.xyz, t_min, best.t)) {
+            if (rope == 0u) { break; }
+            node_idx = rope - 1u;
+            continue;
+        }
+
+        if (is_leaf) {
+            uint triOffset = uint(d2.x);
+            uint triCount = uint(d2.y);
+            for (uint i = 0u; i < triCount; ++i) {
+                uint ti = (triOffset + i) * TRI_STRIDE;
+                vec4 td0 = triangle_data[ti + 0u];
+                vec4 td1 = triangle_data[ti + 1u];
+                vec4 td2 = triangle_data[ti + 2u];
+                vec4 td3 = triangle_data[ti + 3u];
+                float t;
+                vec3 n;
+                vec3 barycentric;
+                if (intersect_triangle(ray, td0.xyz, td1.xyz, td2.xyz, t_min, best.t, t, n, barycentric)) {
+                    vec3 geomNormal = normalize(td3.xyz);
+                    Material candidateMaterial = decode_material(uint(td3.w));
+                    bool backFacing = dot(geomNormal, ray.direction) > 0.0;
+                    if (backFacing && candidateMaterial.double_sided == 0u) {
+                        continue;
+                    }
+                    if (backFacing) {
+                        geomNormal = -geomNormal;
+                    }
+                    vec4 td4 = triangle_data[ti + 4u];
+                    vec4 td5 = triangle_data[ti + 5u];
+                    vec2 uv0 = td4.xy;
+                    vec2 uv1 = td4.zw;
+                    vec2 uv2 = td5.xy;
+                    vec2 candidateUv = uv0 * barycentric.x + uv1 * barycentric.y + uv2 * barycentric.z;
+                    apply_material_textures(candidateMaterial, candidateUv);
+                    if (!accept_material_alpha(candidateMaterial)) {
+                        continue;
+                    }
+
+                    best.hit = true;
+                    best.t = t;
+                    best.p = ray.origin + ray.direction * t;
+                    best.material = candidateMaterial;
+                    best.uv = candidateUv;
+                    best.light_normal = geomNormal;
+                    vec3 n0 = triangle_data[ti + 6u].xyz;
+                    vec3 n1 = triangle_data[ti + 7u].xyz;
+                    vec3 n2 = triangle_data[ti + 8u].xyz;
+                    vec4 t0 = triangle_data[ti + 9u];
+                    vec4 t1 = triangle_data[ti + 10u];
+                    vec4 t2 = triangle_data[ti + 11u];
+                    vec3 shadingNormal = normalize(n0 * barycentric.x + n1 * barycentric.y + n2 * barycentric.z);
+                    if (dot(shadingNormal, geomNormal) < 0.0) {
+                        shadingNormal = -shadingNormal;
+                    }
+                    if (dot(shadingNormal, ray.direction) > 0.0) {
+                        shadingNormal = -shadingNormal;
+                    }
+                    vec3 tangent = normalize(t0.xyz * barycentric.x + t1.xyz * barycentric.y + t2.xyz * barycentric.z);
+                    tangent = tangent - shadingNormal * dot(shadingNormal, tangent);
+                    if (dot(tangent, tangent) < 1e-8) {
+                        vec3 helper = abs(shadingNormal.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                        tangent = cross(helper, shadingNormal);
+                    }
+                    tangent = normalize(tangent);
+                    float tangentSign = (t0.w * barycentric.x + t1.w * barycentric.y + t2.w * barycentric.z) < 0.0 ? -1.0 : 1.0;
+                    vec3 bitangent = normalize(cross(shadingNormal, tangent)) * tangentSign;
+                    best.normal = apply_normal_texture(best.material, best.uv, shadingNormal, tangent, bitangent, ray.direction);
+                    best.front_face = !backFacing;
+                    best.bvh_depth = current_depth;
+                    best.instance_id = 0xffffffffu;
+                    best.mesh_id = 0xffffffffu;
+                    best.tlas_steps = 0u;
+                }
+            }
+            if (rope == 0u) { break; }
+            node_idx = rope - 1u;
+            current_depth = max(current_depth, 1u);
+        } else {
+            node_idx = uint(d2.x);
+            current_depth += 1u;
+        }
+    }
+    return best;
+}
+
+void hit_instance_mesh(Ray ray, float t_min, uint instanceIndex, uint visibilityMask, inout HitRecord best) {
+    if (instanceIndex >= mesh_params.instance_count) {
+        return;
+    }
+    InstanceBoundsRecord bounds = instance_bounds[instanceIndex];
+    if (!intersect_aabb(ray, bounds.bmin.xyz, bounds.bmax.xyz, t_min, best.t)) {
+        return;
+    }
+
+    InstanceRecord instance = instance_records[instanceIndex];
+    if ((instance.metadata.w & visibilityMask) != visibilityMask) {
+        return;
+    }
+    uint meshIndex = instance.metadata.x;
+    if (meshIndex >= mesh_params.mesh_count) {
+        return;
+    }
+    MeshRecord mesh = mesh_records[meshIndex];
+    if (mesh.bvh_data.y == 0u || mesh.bvh_data.w == 0u) {
+        return;
+    }
+
+    Ray localRay;
+    localRay.origin = (instance.inverse_transform * vec4(ray.origin, 1.0)).xyz;
+    localRay.direction = (instance.inverse_transform * vec4(ray.direction, 0.0)).xyz;
+    if (dot(localRay.direction, localRay.direction) < 1e-12) {
+        return;
+    }
+
+    uint node_idx = 0u;
+    uint current_depth = 0u;
+    uint max_local_steps = min(mesh.bvh_data.y * 2u, 8192u);
+    for (uint guard = 0u; guard < max_local_steps && node_idx < mesh.bvh_data.y; ++guard) {
+        best.traversal_steps += 1u;
+        uint b = (mesh.bvh_data.x + node_idx) * 4u;
+        vec4 d0 = local_bvh_nodes[b + 0u];
+        vec4 d1 = local_bvh_nodes[b + 1u];
+        vec4 d2 = local_bvh_nodes[b + 2u];
+        bool is_leaf = d0.w > 0.5;
+        uint rope = uint(d1.w);
+
+        if (!intersect_aabb(localRay, d0.xyz, d1.xyz, t_min, best.t)) {
+            if (rope == 0u) { break; }
+            node_idx = rope - 1u;
+            continue;
+        }
+
+        if (is_leaf) {
+            uint triOffset = uint(d2.x);
+            uint triCount = uint(d2.y);
+            for (uint i = 0u; i < triCount; ++i) {
+                uint ti = (mesh.bvh_data.z + triOffset + i) * TRI_STRIDE;
+                vec4 td0 = local_triangle_data[ti + 0u];
+                vec4 td1 = local_triangle_data[ti + 1u];
+                vec4 td2 = local_triangle_data[ti + 2u];
+                vec4 td3 = local_triangle_data[ti + 3u];
+                float t;
+                vec3 n;
+                vec3 barycentric;
+                if (intersect_triangle(localRay, td0.xyz, td1.xyz, td2.xyz, t_min, best.t, t, n, barycentric)) {
+                    vec3 localGeomNormal = normalize(td3.xyz);
+                    Material candidateMaterial = decode_material(uint(td3.w));
+                    bool backFacing = dot(localGeomNormal, localRay.direction) > 0.0;
+                    if (backFacing && candidateMaterial.double_sided == 0u) {
+                        continue;
+                    }
+                    if (backFacing) {
+                        localGeomNormal = -localGeomNormal;
+                    }
+
+                    vec4 td4 = local_triangle_data[ti + 4u];
+                    vec4 td5 = local_triangle_data[ti + 5u];
+                    vec2 uv0 = td4.xy;
+                    vec2 uv1 = td4.zw;
+                    vec2 uv2 = td5.xy;
+                    vec2 candidateUv = uv0 * barycentric.x + uv1 * barycentric.y + uv2 * barycentric.z;
+                    apply_material_textures(candidateMaterial, candidateUv);
+                    if (!accept_material_alpha(candidateMaterial)) {
+                        continue;
+                    }
+
+                    mat3 normalToWorld = transpose(mat3(instance.inverse_transform));
+                    vec3 worldGeomNormal = normalize(normalToWorld * localGeomNormal);
+                    if (dot(worldGeomNormal, ray.direction) > 0.0) {
+                        worldGeomNormal = -worldGeomNormal;
+                    }
+                    vec3 worldPosition = ray.origin + ray.direction * t;
+
+                    vec3 n0 = local_triangle_data[ti + 6u].xyz;
+                    vec3 n1 = local_triangle_data[ti + 7u].xyz;
+                    vec3 n2 = local_triangle_data[ti + 8u].xyz;
+                    vec4 t0 = local_triangle_data[ti + 9u];
+                    vec4 t1 = local_triangle_data[ti + 10u];
+                    vec4 t2 = local_triangle_data[ti + 11u];
+                    vec3 localShadingNormal = normalize(n0 * barycentric.x + n1 * barycentric.y + n2 * barycentric.z);
+                    if (dot(localShadingNormal, localGeomNormal) < 0.0) {
+                        localShadingNormal = -localShadingNormal;
+                    }
+                    vec3 shadingNormal = normalize(normalToWorld * localShadingNormal);
+                    if (dot(shadingNormal, worldGeomNormal) < 0.0) {
+                        shadingNormal = -shadingNormal;
+                    }
+                    if (dot(shadingNormal, ray.direction) > 0.0) {
+                        shadingNormal = -shadingNormal;
+                    }
+
+                    vec3 localTangent = normalize(t0.xyz * barycentric.x + t1.xyz * barycentric.y + t2.xyz * barycentric.z);
+                    vec3 tangent = normalize(mat3(instance.transform) * localTangent);
+                    tangent = tangent - shadingNormal * dot(shadingNormal, tangent);
+                    if (dot(tangent, tangent) < 1e-8) {
+                        vec3 helper = abs(shadingNormal.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                        tangent = cross(helper, shadingNormal);
+                    }
+                    tangent = normalize(tangent);
+                    float tangentSign = (t0.w * barycentric.x + t1.w * barycentric.y + t2.w * barycentric.z) < 0.0 ? -1.0 : 1.0;
+                    vec3 bitangent = normalize(cross(shadingNormal, tangent)) * tangentSign;
+
+                    best.hit = true;
+                    best.t = t;
+                    best.p = worldPosition;
+                    best.local_p = localRay.origin + localRay.direction * t;
+                    best.material = candidateMaterial;
+                    best.uv = candidateUv;
+                    best.light_normal = worldGeomNormal;
+                    best.normal = apply_normal_texture(best.material, best.uv, shadingNormal, tangent, bitangent, ray.direction);
+                    best.front_face = !backFacing;
+                    best.bvh_depth = current_depth + 1u;
+                    best.instance_id = instanceIndex;
+                    best.mesh_id = meshIndex;
+                }
+            }
+            if (rope == 0u) { break; }
+            node_idx = rope - 1u;
+            current_depth = max(current_depth, 1u);
+        } else {
+            node_idx = uint(d2.x);
+            current_depth += 1u;
+        }
+    }
+}
+
+HitRecord hit_instance_scene(Ray ray, float t_min, float closest_so_far, uint visibilityMask) {
+    HitRecord best;
+    best.t = closest_so_far;
+    best.hit = false;
+    best.traversal_steps = 0u;
+    best.bvh_depth = 0u;
+    best.instance_id = 0xffffffffu;
+    best.mesh_id = 0xffffffffu;
+    best.tlas_steps = 0u;
+    best.light_normal = vec3(0.0, 1.0, 0.0);
+    if (mesh_params.enabled == 0u ||
+        mesh_params.instance_count == 0u ||
+        mesh_params.mesh_count == 0u ||
+        mesh_params.local_bvh_node_count == 0u ||
+        mesh_params.local_triangle_count == 0u) {
+        return best;
+    }
+
+    if (mesh_params.tlas_node_count > 0u && mesh_params.tlas_instance_index_count > 0u) {
+        uint node_idx = 0u;
+        uint max_tlas_steps = min(mesh_params.tlas_node_count * 2u, 8192u);
+        for (uint guard = 0u; guard < max_tlas_steps && node_idx < mesh_params.tlas_node_count; ++guard) {
+            best.traversal_steps += 1u;
+            best.tlas_steps += 1u;
+            uint b = node_idx * 4u;
+            vec4 d0 = tlas_nodes[b + 0u];
+            vec4 d1 = tlas_nodes[b + 1u];
+            vec4 d2 = tlas_nodes[b + 2u];
+            bool is_leaf = d0.w > 0.5;
+            uint rope = uint(d1.w);
+
+            if (!intersect_aabb(ray, d0.xyz, d1.xyz, t_min, best.t)) {
+                if (rope == 0u) { break; }
+                node_idx = rope - 1u;
+                continue;
+            }
+
+            if (is_leaf) {
+                uint instanceOffset = uint(d2.x);
+                uint instanceCount = uint(d2.y);
+                for (uint i = 0u; i < instanceCount; ++i) {
+                    uint indexSlot = instanceOffset + i;
+                    if (indexSlot < mesh_params.tlas_instance_index_count) {
+                        hit_instance_mesh(ray, t_min, tlas_instance_indices[indexSlot], visibilityMask, best);
+                    }
+                }
+                if (rope == 0u) { break; }
+                node_idx = rope - 1u;
+            } else {
+                node_idx = uint(d2.x);
+            }
+        }
+        return best;
+    }
+
+    for (uint instanceIndex = 0u; instanceIndex < mesh_params.instance_count; ++instanceIndex) {
+        hit_instance_mesh(ray, t_min, instanceIndex, visibilityMask, best);
+    }
+    return best;
+}
+
+bool hit_sphere(Ray ray, uint i, float t_min, float t_max, out HitRecord rec) {
+    vec4 d0 = scene_spheres[i * 4u];
+    vec3 center = d0.xyz;
+    float radius = d0.w;
+    vec3 oc = ray.origin - center;
+    float a = dot(ray.direction, ray.direction);
+    float half_b = dot(oc, ray.direction);
+    float c = dot(oc, oc) - radius * radius;
+    float discriminant = half_b * half_b - a * c;
+    if (discriminant < 0.0) {
+        return false;
+    }
+    float sqrtd = sqrt(discriminant);
+    float root = (-half_b - sqrtd) / a;
+    if (root < t_min || root > t_max) {
+        root = (-half_b + sqrtd) / a;
+        if (root < t_min || root > t_max) {
+            return false;
+        }
+    }
+    rec.t = root;
+    rec.p = ray.origin + ray.direction * rec.t;
+    rec.local_p = rec.p;
+    vec3 outward = (rec.p - center) / radius;
+    rec.front_face = dot(ray.direction, outward) < 0.0;
+    rec.normal = rec.front_face ? outward : -outward;
+    rec.light_normal = rec.normal;
+    rec.material = decode_sphere_material(i);
+    rec.hit = true;
+    rec.uv = vec2(0.0);
+    rec.traversal_steps = 1u;
+    rec.bvh_depth = 0u;
+    rec.instance_id = 0xfffffffeu;
+    rec.mesh_id = 0xfffffffeu;
+    rec.tlas_steps = 0u;
+    return true;
+}
+
+HitRecord hit_world_mask(Ray ray, uint visibilityMask) {
+    HitRecord rec = hit_instance_scene(ray, 0.0001, 1e30, visibilityMask);
+    if (mesh_params.instance_count == 0u || mesh_params.local_bvh_node_count == 0u || mesh_params.local_triangle_count == 0u) {
+        rec = hit_bvh(ray, 0.0001, 1e30);
+    }
+    for (uint i = 0u; i < mesh_params.sphere_count; ++i) {
+        HitRecord srec;
+        if (hit_sphere(ray, i, 0.0001, rec.hit ? rec.t : 1e30, srec)) {
+            srec.traversal_steps += rec.traversal_steps;
+            srec.tlas_steps += rec.tlas_steps;
+            rec = srec;
+        }
+    }
+    return rec;
+}
+
+HitRecord hit_world(Ray ray) {
+    return hit_world_mask(ray, 1u | 2u);
+}
+
+vec2 env_uv_from_dir(vec3 dir) {
+    vec3 d = normalize(dir);
+    return vec2(atan(d.z, d.x) / (2.0 * PI) + 0.5, asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
+}
+
+vec3 env_dir_from_uv(vec2 uv) {
+    float phi = (uv.x - 0.5) * 2.0 * PI;
+    float lat = (uv.y - 0.5) * PI;
+    float cosLat = cos(lat);
+    return normalize(vec3(cosLat * cos(phi), sin(lat), cosLat * sin(phi)));
+}
+
+vec3 rotate_y(vec3 v, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+
+vec3 analytical_sun_direction() {
+    float elevation = clamp(camera.atmosphere.x, -0.20, 1.45);
+    float cosElevation = cos(elevation);
+    vec3 localSun = normalize(vec3(-cosElevation, sin(elevation), -0.12 * cosElevation));
+    return rotate_y(localSun, -env_params.rotation);
+}
+
+vec3 analytical_sun_center_radiance() {
+    if (camera.sunlight_enabled != 0u) {
+        float sunHeight = smoothstep(-0.08, 0.22, analytical_sun_direction().y);
+        vec3 sunsetTint = vec3(1.0, 0.46, 0.16);
+        vec3 noonTint = vec3(1.0, 0.96, 0.84);
+        return mix(sunsetTint, noonTint, sunHeight) * camera.sun_intensity * 32.0;
+    }
+    return vec3(0.0);
+}
+
+vec3 analytical_sun_disk_radiance(vec3 dir) {
+    if (camera.sunlight_enabled == 0u) {
+        return vec3(0.0);
+    }
+    float radius = max(camera.sun_angular_radius, 0.00465);
+    float cosAngle = dot(normalize(dir), analytical_sun_direction());
+    float cosRadius = cos(radius);
+    float disk = smoothstep(cosRadius, mix(cosRadius, 1.0, 0.18), cosAngle);
+    float limb = 0.62 + 0.38 * sqrt(clamp((cosAngle - cosRadius) / max(1.0 - cosRadius, 1.0e-5), 0.0, 1.0));
+    return analytical_sun_center_radiance() * disk * limb;
+}
+
+vec3 fast_sky_radiance(vec3 dir) {
+    vec3 viewDir = normalize(dir);
+    vec3 sunDir = analytical_sun_direction();
+    float viewUp = clamp(viewDir.y, -0.08, 1.0);
+    float sunUp = clamp(sunDir.y, -0.08, 1.0);
+    float cosTheta = clamp(dot(viewDir, sunDir), -1.0, 1.0);
+    float sunVisibility = smoothstep(-0.06, 0.08, sunUp);
+    float viewMass = atmosphere_air_mass(viewUp);
+    float sunMass = atmosphere_air_mass(sunUp);
+    float horizon = pow(1.0 - clamp(viewUp, 0.0, 1.0), 2.0);
+
+    vec3 rayleighBeta = vec3(0.170, 0.398, 0.970);
+    vec3 mieBeta = vec3(0.82, 0.74, 0.62);
+    vec3 transmittance = exp(-(rayleighBeta * 0.30 + mieBeta * 0.08) * (viewMass + sunMass * 0.65));
+    vec3 sunsetScatter = vec3(1.0, 0.42, 0.12) * smoothstep(-0.08, 0.18, horizon) * (1.0 - smoothstep(0.05, 0.55, sunUp));
+
+    vec3 rayleigh = rayleighBeta * atmosphere_rayleigh_phase(cosTheta) * (0.55 + horizon * 0.75);
+    vec3 mie = mieBeta * atmosphere_mie_phase(cosTheta, 0.78) * (0.05 + horizon * 0.26);
+    vec3 sky = (rayleigh + mie + sunsetScatter * 0.22) * transmittance * sunVisibility;
+
+    vec3 night = vec3(0.004, 0.006, 0.012) * smoothstep(-0.25, -0.05, sunUp);
+    return max(sky * camera.sky_intensity * 5.5 + night * camera.sky_intensity, vec3(0.0));
+}
+
+vec3 analytical_sun_radiance(vec3 dir) {
+    return analytical_sun_disk_radiance(dir);
+}
+
+vec2 atmosphere_latlong_uv(vec3 dir) {
+    vec3 d = normalize(dir);
+    return vec2(atan(d.z, d.x) / (2.0 * PI) + 0.5, asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
+}
+
+vec3 sample_sky_view_lut(vec3 dir) {
+    vec2 uv = atmosphere_latlong_uv(dir);
+    return texture(sampler2D(atmosphere_sky_view_lut, atmosphere_sampler), vec2(fract(uv.x), clamp(uv.y, 0.0, 1.0))).rgb;
+}
+
+float atmosphere_horizon_visibility(vec3 scenePos, vec3 dir) {
+    vec3 planetary = atmosphere_scene_to_planetary(scenePos);
+    float radius = max(length(planetary), ATMOSPHERE_PLANET_RADIUS + 1.0);
+    float horizonMu = -sqrt(max(1.0 - (ATMOSPHERE_PLANET_RADIUS * ATMOSPHERE_PLANET_RADIUS) / (radius * radius), 0.0));
+    float viewMu = dot(normalize(dir), normalize(planetary));
+    return smoothstep(horizonMu - 0.004, horizonMu + 0.004, viewMu);
+}
+
+vec3 atmosphere_sky_radiance(vec3 dir) {
+    vec3 viewDir = normalize(dir);
+    float horizonVisibility = atmosphere_horizon_visibility(camera.pos.xyz, viewDir);
+    if (horizonVisibility <= 1.0e-4) {
+        return vec3(0.0);
+    }
+    vec3 sampled = sample_sky_view_lut(viewDir);
+    float sampledLuminance = dot(sampled, vec3(0.2126, 0.7152, 0.0722));
+    if (sampledLuminance > 1.0e-5) {
+        return sampled * horizonVisibility;
+    }
+    return fast_sky_radiance(viewDir) * horizonVisibility;
+}
+
+vec3 sample_atmosphere_transmittance_lut(vec3 worldPos, vec3 dir) {
+    vec3 planetary = atmosphere_scene_to_planetary(worldPos);
+    float heightMeters = max(length(planetary) - ATMOSPHERE_PLANET_RADIUS, 0.0);
+    float mu = dot(normalize(dir), normalize(planetary));
+    float atmosphereHeight = max(ATMOSPHERE_TOP_RADIUS - ATMOSPHERE_PLANET_RADIUS, 1.0);
+    vec2 uv = vec2(clamp((mu + 0.20) / 1.20, 0.0, 1.0), clamp(heightMeters / atmosphereHeight, 0.0, 1.0));
+    vec3 sampled = texture(sampler2D(atmosphere_transmittance_lut, atmosphere_sampler), uv).rgb;
+    float sampledLuminance = dot(sampled, vec3(0.2126, 0.7152, 0.0722));
+    return sampledLuminance > 1.0e-5 ? sampled : vec3(1.0);
+}
+
+vec3 sample_multi_scatter_lut_debug(vec3 dir) {
+    vec3 sunDir = analytical_sun_direction();
+    float viewMu = clamp(normalize(dir).y, -0.20, 1.0);
+    float sunMu = clamp(sunDir.y, -0.20, 1.0);
+    vec2 uv = vec2(clamp((viewMu + 0.20) / 1.20, 0.0, 1.0), clamp((sunMu + 0.20) / 1.20, 0.0, 1.0));
+    return texture(sampler2D(atmosphere_multi_scatter_lut, atmosphere_sampler), uv).rgb;
+}
+
+vec3 sun_transmittance(vec3 worldPos, vec3 sunDir) {
+    return sample_atmosphere_transmittance_lut(worldPos, sunDir);
+}
+
+vec3 apply_analytical_aerial_perspective(vec3 radiance, vec3 origin, vec3 direction, float distanceMeters) {
+    if (distanceMeters <= 0.0 || distanceMeters >= 9999.0) {
+        return radiance;
+    }
+    float viewMu = clamp(normalize(direction).y, -0.15, 1.0);
+    vec2 uv = vec2(clamp(sqrt(clamp(distanceMeters / 100000.0, 0.0, 1.0)), 0.0, 1.0), clamp((viewMu + 0.15) / 1.15, 0.0, 1.0));
+    vec4 aerial = texture(sampler2D(atmosphere_aerial_perspective_lut, atmosphere_sampler), uv);
+    float aerialLuminance = dot(aerial.rgb, vec3(0.2126, 0.7152, 0.0722));
+    if (aerial.a <= 1.0e-5 && aerialLuminance <= 1.0e-5) {
+        return radiance;
+    }
+    return radiance * clamp(aerial.a, 0.0, 1.0) + max(aerial.rgb, vec3(0.0));
+}
+
+vec3 environment_radiance(vec3 dir) {
+    if (debug_params.view == 27u) {
+        return vec3(DEBUG_WHITE_ENV_RADIANCE);
+    }
+    if (env_params.enabled != 0u) {
+        if (env_params.procedural != 0u) {
+            return atmosphere_sky_radiance(dir) + analytical_sun_disk_radiance(dir);
+        }
+        vec3 localDir = rotate_y(dir, env_params.rotation);
+        vec2 uv = env_uv_from_dir(localDir);
+        vec3 sampled = texture(sampler2D(env_map, env_sampler), vec2(fract(uv.x), clamp(uv.y, 0.0, 1.0))).rgb;
+        return sampled * env_params.intensity + analytical_sun_radiance(dir);
+    }
+    return atmosphere_sky_radiance(dir) + analytical_sun_disk_radiance(dir);
+}
+
+vec3 debug_display_tonemap(vec3 color) {
+    color = max(color, vec3(0.0));
+    color = color / (color + vec3(1.0));
+    return pow(color, vec3(1.0 / 2.2));
+}
+
+vec3 clamp_firefly_sample(vec3 sampleColor, vec3 previousAverage, uint frameCount) {
+    sampleColor = max(sampleColor, vec3(0.0));
+    float sampleLum = dot(sampleColor, vec3(0.2126, 0.7152, 0.0722));
+    if (sampleLum <= 1.0e-5) {
+        return sampleColor;
+    }
+
+    float previousLum = dot(max(previousAverage, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+    float warmupLimit = mix(96.0, 48.0, clamp(float(frameCount) / 16.0, 0.0, 1.0));
+    float historyLimit = max(48.0, previousLum * 10.0 + 6.0);
+    float maxLum = frameCount <= 1u ? warmupLimit : min(warmupLimit, historyLimit);
+    return sampleColor * min(1.0, maxLum / sampleLum);
+}
+
+vec3 fast_preview_ambient(Material material, vec3 normal) {
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    vec3 sampleDir = normalize(normal + up * 0.45);
+    float hemisphere = 0.35 + 0.65 * max(dot(normal, up), 0.0);
+    return material.color * environment_radiance(sampleDir) * (0.16 + 0.24 * hemisphere);
+}
+
+float environment_pdf(vec3 dir) {
+    if (env_params.enabled == 0u || env_params.width == 0u || env_params.height == 0u || env_params.inv_total_lum <= 0.0) {
+        return 1.0 / (4.0 * PI);
+    }
+    vec3 localDir = rotate_y(dir, env_params.rotation);
+    vec2 uv = env_uv_from_dir(localDir);
+    uint col = uint(clamp(uv.x * float(env_params.width), 0.0, float(env_params.width - 1u)));
+    uint row = uint(clamp(uv.y * float(env_params.height), 0.0, float(env_params.height - 1u)));
+    vec3 sampleValue = texelFetch(sampler2D(env_map, env_sampler), ivec2(int(col), int(row)), 0).rgb;
+    float lum = dot(sampleValue, vec3(0.2126, 0.7152, 0.0722));
+    return max(lum * float(env_params.width) * float(env_params.height) * env_params.inv_total_lum / (2.0 * PI * PI), 0.0);
+}
+
+vec3 sample_environment_direction(out vec3 out_dir, out float out_pdf) {
+    out_pdf = 0.0;
+    if (env_params.enabled == 0u || env_params.width == 0u || env_params.height == 0u || env_params.inv_total_lum <= 0.0) {
+        float z = 1.0 - 2.0 * rand_f32();
+        float phi = 2.0 * PI * rand_f32();
+        float r = sqrt(max(1.0 - z * z, 0.0));
+        out_dir = vec3(r * cos(phi), z, r * sin(phi));
+        out_pdf = 1.0 / (4.0 * PI);
+        return atmosphere_sky_radiance(out_dir);
+    }
+
+    float rowSample = rand_f32() * float(env_params.height);
+    uint rowCandidate = min(uint(rowSample), env_params.height - 1u);
+    vec2 rowAlias = env_alias_rows[rowCandidate];
+    uint row = fract(rowSample) <= rowAlias.x ? rowCandidate : min(uint(rowAlias.y + 0.5), env_params.height - 1u);
+
+    float colSample = rand_f32() * float(env_params.width);
+    uint colCandidate = min(uint(colSample), env_params.width - 1u);
+    uint colOffset = row * env_params.width;
+    vec2 colAlias = env_alias_cols[colOffset + colCandidate];
+    uint col = fract(colSample) <= colAlias.x ? colCandidate : min(uint(colAlias.y + 0.5), env_params.width - 1u);
+    vec2 uv = vec2((float(col) + 0.5) / float(env_params.width), (float(row) + 0.5) / float(env_params.height));
+    out_dir = rotate_y(env_dir_from_uv(uv), -env_params.rotation);
+    if (env_params.procedural != 0u) {
+        vec3 radiance = atmosphere_sky_radiance(out_dir);
+        out_pdf = environment_pdf(out_dir);
+        return radiance;
+    }
+    vec3 radiance = texelFetch(sampler2D(env_map, env_sampler), ivec2(int(col), int(row)), 0).rgb * env_params.intensity;
+    out_pdf = environment_pdf(out_dir);
+    return radiance;
+}
+
+float power_heuristic(float pdf_a, float pdf_b) {
+    float a2 = pdf_a * pdf_a;
+    float b2 = pdf_b * pdf_b;
+    return a2 / max(a2 + b2, 1e-8);
+}
+
+float reflectance(float cosine, float ref_idx) {
+    float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(clamp(1.0 - cosine, 0.0, 1.0), 5.0);
+}
+
+float diffuse_pdf(vec3 normal, vec3 wi) {
+    return max(dot(normal, wi), 0.0) / PI;
+}
+
+float brdf_luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float pbr_specular_sample_probability(Material material) {
+    float metallic = clamp(material.metallic, 0.0, 1.0);
+    vec3 f0 = mix(vec3(0.04), material.color, metallic);
+    vec3 kd = (vec3(1.0) - f0) * (1.0 - metallic);
+    float specularWeight = max(brdf_luminance(f0), 0.0);
+    float diffuseWeight = max(brdf_luminance(kd * material.color * (1.0 / PI)), 0.0);
+    return clamp(specularWeight / max(specularWeight + diffuseWeight, 1e-6), 0.05, 0.95);
+}
+
+vec3 sample_cosine_hemisphere(vec3 normal, out float pdf) {
+    float r1 = 2.0 * PI * rand_f32();
+    float r2 = rand_f32();
+    float r2s = sqrt(r2);
+    vec3 axis = abs(normal.x) > 0.1 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(axis, normal));
+    vec3 bitangent = cross(normal, tangent);
+    vec3 dir = normalize(tangent * cos(r1) * r2s + bitangent * sin(r1) * r2s + normal * sqrt(max(1.0 - r2, 0.0)));
+    pdf = diffuse_pdf(normal, dir);
+    return dir;
+}
+
+float ggx_ndf(float roughness, float n_dot_h) {
+    float r = max(roughness, 0.02);
+    float a = r * r;
+    float a2 = a * a;
+    float d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-10);
+}
+
+vec3 schlick_fresnel(vec3 f0, float v_dot_h) {
+    float f = pow(clamp(1.0 - v_dot_h, 0.0, 1.0), 5.0);
+    return f0 + (vec3(1.0) - f0) * f;
+}
+
+float smith_g1(float roughness, float n_dot_x) {
+    float r = max(roughness, 0.02);
+    float a = r * r;
+    float a2 = a * a;
+    float n2 = n_dot_x * n_dot_x;
+    return 2.0 * n_dot_x / max(n_dot_x + sqrt(a2 + (1.0 - a2) * n2), 1e-10);
+}
+
+float smith_g(float roughness, float n_dot_v, float n_dot_l) {
+    return smith_g1(roughness, n_dot_v) * smith_g1(roughness, n_dot_l);
+}
+
+vec3 ggx_energy_compensation(vec3 f0, float roughness, float n_dot_v) {
+    float r = clamp(roughness, 0.02, 1.0);
+    float r2 = r * r;
+    float singleScatterEnergy = clamp(1.0 - r2 * (0.45 + 0.25 * (1.0 - clamp(n_dot_v, 0.0, 1.0))), 0.35, 1.0);
+    vec3 averageFresnel = f0 + (vec3(1.0) - f0) * (1.0 / 21.0);
+    vec3 multiScatter = averageFresnel * (1.0 - singleScatterEnergy) / max(singleScatterEnergy, 1e-4);
+    return vec3(1.0) + multiScatter;
+}
+
+vec3 eval_ggx_brdf(Material material, vec3 wo, vec3 wi, vec3 n) {
+    float n_dot_v = max(dot(n, wo), 0.0);
+    float n_dot_l = max(dot(n, wi), 0.0);
+    if (n_dot_v < 1e-6 || n_dot_l < 1e-6) {
+        return vec3(0.0);
+    }
+
+    vec3 halfVector = wo + wi;
+    if (dot(halfVector, halfVector) < 1e-12) {
+        return vec3(0.0);
+    }
+    vec3 h = normalize(halfVector);
+    float n_dot_h = max(dot(n, h), 0.0);
+    float v_dot_h = max(dot(wo, h), 0.0);
+    vec3 f0 = mix(vec3(0.04), material.color, clamp(material.metallic, 0.0, 1.0));
+    vec3 f = schlick_fresnel(f0, v_dot_h);
+    float d = ggx_ndf(material.roughness, n_dot_h);
+    float g = smith_g(material.roughness, n_dot_v, n_dot_l);
+    vec3 specular = f * d * g * ggx_energy_compensation(f0, material.roughness, n_dot_v) / max(4.0 * n_dot_v * n_dot_l, 1e-10);
+
+    vec3 kd = mix(vec3(1.0) - f, vec3(0.0), clamp(material.metallic, 0.0, 1.0));
+    vec3 diffuse = kd * material.color * (1.0 / PI);
+    return diffuse + specular;
+}
+
+float pdf_ggx_brdf(Material material, vec3 wo, vec3 wi, vec3 n) {
+    float n_dot_v = max(dot(n, wo), 0.0);
+    float n_dot_l = max(dot(n, wi), 0.0);
+    if (n_dot_v < 1e-6 || n_dot_l < 1e-6) {
+        return 0.0;
+    }
+
+    vec3 halfVector = wo + wi;
+    if (dot(halfVector, halfVector) < 1e-12) {
+        return 0.0;
+    }
+    vec3 h = normalize(halfVector);
+    float n_dot_h = max(dot(n, h), 0.0);
+    float v_dot_h = max(dot(wo, h), 0.0);
+    float d = ggx_ndf(material.roughness, n_dot_h);
+    return d * n_dot_h / max(4.0 * v_dot_h, 1e-10);
+}
+
+float pdf_pbr_brdf(Material material, vec3 wo, vec3 wi, vec3 n) {
+    float specularProbability = pbr_specular_sample_probability(material);
+    float diffuseProbability = 1.0 - specularProbability;
+    return diffuseProbability * diffuse_pdf(n, wi) + specularProbability * pdf_ggx_brdf(material, wo, wi, n);
+}
+
+vec3 sample_ggx_brdf(Material material, vec3 wo, vec3 n) {
+    float r = max(material.roughness, 0.02);
+    float a = r * r;
+    float r1 = rand_f32();
+    float r2 = rand_f32();
+    float phi = r1 * 2.0 * PI;
+    float cosTheta = sqrt((1.0 - r2) / max(1.0 + (a * a - 1.0) * r2, 1e-8));
+    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+
+    vec3 axis = abs(n.x) > 0.1 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(axis, n));
+    vec3 bitangent = cross(n, tangent);
+    vec3 h = normalize(tangent * cos(phi) * sinTheta + bitangent * sin(phi) * sinTheta + n * cosTheta);
+    return normalize(2.0 * dot(wo, h) * h - wo);
+}
+
+vec3 eval_brdf(Material material, vec3 wo, vec3 wi, vec3 n) {
+    if (material.mat_type == 0u) {
+        return material.color * (1.0 / PI);
+    }
+    if (material.mat_type == 3u || material.mat_type == 4u) {
+        return eval_ggx_brdf(material, wo, wi, n);
+    }
+    return vec3(0.0);
+}
+
+float pdf_brdf(Material material, vec3 wo, vec3 wi, vec3 n) {
+    if (material.mat_type == 0u) {
+        return diffuse_pdf(n, wi);
+    }
+    if (material.mat_type == 3u || material.mat_type == 4u) {
+        return pdf_pbr_brdf(material, wo, wi, n);
+    }
+    return 0.0;
+}
+
+vec3 sample_brdf(Material material, vec3 wo, vec3 n, out float pdf) {
+    if (material.mat_type == 3u || material.mat_type == 4u) {
+        float specularProbability = pbr_specular_sample_probability(material);
+        vec3 wi;
+        if (rand_f32() < specularProbability) {
+            wi = sample_ggx_brdf(material, wo, n);
+        } else {
+            float diffusePdf;
+            wi = sample_cosine_hemisphere(n, diffusePdf);
+        }
+        pdf = pdf_pbr_brdf(material, wo, wi, n);
+        return wi;
+    }
+
+    vec3 wi = sample_cosine_hemisphere(n, pdf);
+    return wi;
+}
+
+float emissive_total_area() {
+    return mesh_params.emissive_total_area;
+}
+
+bool sample_emissive_light(vec3 hitPos, out vec3 wi, out vec3 emission, out float pdfSolidAngle, out float distanceToLight) {
+    float totalWeight = emissive_total_area();
+    if (totalWeight <= 1e-8 || mesh_params.light_count == 0u) {
+        wi = vec3(0.0, 1.0, 0.0);
+        emission = vec3(0.0);
+        pdfSolidAngle = 0.0;
+        distanceToLight = 0.0;
+        return false;
+    }
+
+    float targetArea = rand_f32() * totalWeight;
+    vec3 samplePos = vec3(0.0);
+    vec3 lightNormal = vec3(0.0, -1.0, 0.0);
+    emission = vec3(0.0);
+
+    uint lo = 0u;
+    uint hi = mesh_params.light_count - 1u;
+    for (uint guard = 0u; guard < 32u && lo < hi; ++guard) {
+        uint mid = (lo + hi) / 2u;
+        if (targetArea <= light_records[mid].data0.y) {
+            hi = mid;
+        } else {
+            lo = mid + 1u;
+        }
+    }
+    LightRecord selected = light_records[lo];
+
+    if (selected.metadata.x == 0u) {
+        uint ti = selected.metadata.y * TRI_STRIDE;
+        uint instanceIndex = selected.metadata.w;
+        if (instanceIndex >= mesh_params.instance_count || ti + 3u >= mesh_params.local_triangle_count * TRI_STRIDE) {
+            wi = vec3(0.0, 1.0, 0.0);
+            pdfSolidAngle = 0.0;
+            distanceToLight = 0.0;
+            return false;
+        }
+        InstanceRecord instance = instance_records[instanceIndex];
+        vec4 td3 = local_triangle_data[ti + 3u];
+        Material material = decode_material(selected.metadata.z);
+        vec3 v0 = (instance.transform * vec4(local_triangle_data[ti + 0u].xyz, 1.0)).xyz;
+        vec3 v1 = (instance.transform * vec4(local_triangle_data[ti + 1u].xyz, 1.0)).xyz;
+        vec3 v2 = (instance.transform * vec4(local_triangle_data[ti + 2u].xyz, 1.0)).xyz;
+        float r1 = rand_f32();
+        float r2 = rand_f32();
+        float sr1 = sqrt(r1);
+        float u = 1.0 - sr1;
+        float v = sr1 * (1.0 - r2);
+        float w = sr1 * r2;
+        samplePos = v0 * u + v1 * v + v2 * w;
+        lightNormal = normalize(transpose(mat3(instance.inverse_transform)) * td3.xyz);
+        emission = material.emissive;
+    } else if (selected.metadata.x == 1u) {
+        uint sphereIndex = selected.metadata.y;
+        Material material = decode_sphere_material(sphereIndex);
+        vec4 s = scene_spheres[sphereIndex * 4u];
+        vec3 n = rand_unit_vector();
+        samplePos = s.xyz + n * s.w;
+        lightNormal = n;
+        emission = material.emissive;
+    } else if (selected.metadata.x == 2u) {
+        wi = normalize(selected.data1.xyz);
+        emission = selected.data2.xyz;
+        pdfSolidAngle = selected.data0.x / max(totalWeight, 1e-6);
+        distanceToLight = 10000.0;
+        return length(emission) > 0.0 && pdfSolidAngle > 0.0;
+    } else if (selected.metadata.x == 3u) {
+        samplePos = selected.data1.xyz;
+        lightNormal = normalize(samplePos - hitPos);
+        emission = selected.data2.xyz / max(dot(samplePos - hitPos, samplePos - hitPos), 1e-4);
+    } else {
+        vec3 center = selected.data1.xyz;
+        vec3 n = normalize(vec3(selected.data1.w, selected.data2.w, selected.data3.x));
+        vec3 tangent = normalize(abs(n.y) < 0.99 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+        vec3 bitangent = normalize(cross(n, tangent));
+        float halfSize = selected.data0.z * 0.5;
+        samplePos = center + tangent * ((rand_f32() * 2.0 - 1.0) * halfSize) + bitangent * ((rand_f32() * 2.0 - 1.0) * halfSize);
+        lightNormal = n;
+        emission = selected.data2.xyz;
+    }
+
+    vec3 toLight = samplePos - hitPos;
+    float distSq = dot(toLight, toLight);
+    distanceToLight = sqrt(max(distSq, 1e-8));
+    wi = toLight / distanceToLight;
+    float cosLight = max(dot(-wi, lightNormal), 0.0);
+    if (selected.metadata.x == 3u) {
+        pdfSolidAngle = selected.data0.x / max(totalWeight, 1e-6);
+    } else {
+        float selectionPdf = selected.data0.x / max(totalWeight, 1e-6);
+        float area = max(selected.data0.w, 1e-6);
+        pdfSolidAngle = cosLight > 1e-6 ? selectionPdf * distSq / (cosLight * area) : 0.0;
+    }
+    return length(emission) > 0.0 && pdfSolidAngle > 0.0;
+}
+
+float emissive_hit_pdf(HitRecord rec, vec3 previousOrigin) {
+    float totalArea = emissive_total_area();
+    if (totalArea <= 1e-8 || length(rec.material.emissive) <= 0.0) {
+        return 0.0;
+    }
+
+    vec3 toLight = rec.p - previousOrigin;
+    float distSq = dot(toLight, toLight);
+    float dist = sqrt(max(distSq, 1e-8));
+    vec3 wi = toLight / dist;
+    float cosLight = max(dot(-wi, rec.light_normal), 0.0);
+    return cosLight > 1e-6 ? distSq / (cosLight * totalArea) : 0.0;
+}
+
+vec3 shadow_origin(HitRecord rec, vec3 wi) {
+    vec3 n = normalize(rec.light_normal);
+    return rec.p + n * (dot(n, wi) >= 0.0 ? SHADOW_SELF_HIT_EPSILON : -SHADOW_SELF_HIT_EPSILON);
+}
+
+bool visible_directional_shadow(HitRecord shadow) {
+    return !shadow.hit || shadow.t <= 0.0001;
+}
+
+bool visible_segment_shadow(HitRecord shadow, float distanceToLight) {
+    return !shadow.hit ||
+        shadow.t <= 0.0001 ||
+        shadow.t > distanceToLight - 0.0001;
+}
+
+vec3 estimate_direct_lighting(
+    HitRecord rec,
+    Material material,
+    vec3 wo,
+    out vec3 emissiveContribution,
+    out vec3 environmentContribution,
+    out float sampledLightPdf,
+    out float sampledBsdfPdf,
+    out float sampledMisWeight,
+    out uint sampledType) {
+    emissiveContribution = vec3(0.0);
+    environmentContribution = vec3(0.0);
+    sampledLightPdf = 0.0;
+    sampledBsdfPdf = 0.0;
+    sampledMisWeight = 0.0;
+    sampledType = 0u;
+    bool isDelta = material.mat_type == 1u || material.mat_type == 2u;
+    if (camera.direct_lighting_enabled == 0u || isDelta || debug_params.view == 27u) {
+        return vec3(0.0);
+    }
+    vec3 lightingNormal = normalize(rec.light_normal);
+
+    uint risCandidateCount = restir_mode() != 0u ? 4u : 1u;
+    vec3 selectedWi = vec3(0.0, 1.0, 0.0);
+    vec3 selectedEmission = vec3(0.0);
+    vec3 selectedBsdf = vec3(0.0);
+    float selectedLightPdf = 0.0;
+    float selectedBsdfPdf = 0.0;
+    float selectedDistance = 0.0;
+    float selectedProxy = 0.0;
+    float proxyWeightSum = 0.0;
+    bool selectedCandidate = false;
+    for (uint candidate = 0u; candidate < risCandidateCount; ++candidate) {
+        vec3 candidateWi;
+        vec3 candidateEmission;
+        float candidateLightPdf;
+        float candidateDistance;
+        if (!sample_emissive_light(rec.p, candidateWi, candidateEmission, candidateLightPdf, candidateDistance)) {
+            continue;
+        }
+        float candidateCos = max(dot(lightingNormal, candidateWi), 0.0);
+        if (candidateCos <= 0.0 || candidateLightPdf <= 1.0e-6) {
+            continue;
+        }
+        vec3 candidateBsdf = eval_brdf(material, wo, candidateWi, lightingNormal);
+        float candidateBsdfPdf = pdf_brdf(material, wo, candidateWi, lightingNormal);
+        vec3 candidateEstimate = candidateBsdf * candidateEmission * candidateCos / max(candidateLightPdf, 1.0e-6);
+        float candidateProxy = max(dot(candidateEstimate, vec3(0.2126, 0.7152, 0.0722)), 0.0);
+        proxyWeightSum += candidateProxy;
+        if (candidateProxy > 0.0 && rand_f32() * proxyWeightSum <= candidateProxy) {
+            selectedWi = candidateWi;
+            selectedEmission = candidateEmission;
+            selectedBsdf = candidateBsdf;
+            selectedLightPdf = candidateLightPdf;
+            selectedBsdfPdf = candidateBsdfPdf;
+            selectedDistance = candidateDistance;
+            selectedProxy = candidateProxy;
+            selectedCandidate = true;
+        }
+    }
+    if (selectedCandidate && selectedProxy > 0.0) {
+        Ray shadowRay;
+        shadowRay.origin = shadow_origin(rec, selectedWi);
+        shadowRay.direction = selectedWi;
+        HitRecord shadow = hit_world_mask(shadowRay, 1u | 4u);
+        bool visible = visible_segment_shadow(shadow, selectedDistance);
+        float cosSurface = max(dot(lightingNormal, selectedWi), 0.0);
+        if (visible && cosSurface > 0.0) {
+            float weight = power_heuristic(selectedLightPdf, selectedBsdfPdf);
+            float risNormalization = risCandidateCount > 1u ? proxyWeightSum / (float(risCandidateCount) * selectedProxy) : 1.0;
+            sampledLightPdf = selectedLightPdf;
+            sampledBsdfPdf = selectedBsdfPdf;
+            sampledMisWeight = weight;
+            sampledType = 1u;
+            emissiveContribution = selectedBsdf * selectedEmission * cosSurface * weight * risNormalization / max(selectedLightPdf, 1e-6);
+        }
+    }
+
+    uint envSampleCount = clamp(camera.environment_direct_samples, 1u, 8u);
+    for (uint envSample = 0u; envSample < envSampleCount; ++envSample) {
+        vec3 envDir;
+        float envPdf;
+        vec3 envRadiance = sample_environment_direction(envDir, envPdf);
+        if (envPdf <= 0.0) {
+            continue;
+        }
+        Ray shadowRay;
+        shadowRay.origin = shadow_origin(rec, envDir);
+        shadowRay.direction = envDir;
+        HitRecord shadow = hit_world_mask(shadowRay, 1u | 4u);
+        float cosSurface = max(dot(lightingNormal, envDir), 0.0);
+        if (visible_directional_shadow(shadow) && cosSurface > 0.0) {
+            vec3 bsdf = eval_brdf(material, wo, envDir, lightingNormal);
+            float bsdfPdf = pdf_brdf(material, wo, envDir, lightingNormal);
+            float weight = power_heuristic(envPdf, bsdfPdf);
+            if (sampledLightPdf <= 0.0) {
+                sampledLightPdf = envPdf;
+                sampledBsdfPdf = bsdfPdf;
+                sampledMisWeight = weight;
+                sampledType = 2u;
+            }
+            environmentContribution += bsdf * envRadiance * cosSurface * weight / max(envPdf, 1e-6);
+        }
+    }
+    environmentContribution /= float(envSampleCount);
+
+    vec3 sunContribution = vec3(0.0);
+    if (camera.sunlight_enabled != 0u) {
+        vec3 sunDir = analytical_sun_direction();
+        Ray shadowRay;
+        shadowRay.origin = shadow_origin(rec, sunDir);
+        shadowRay.direction = sunDir;
+        HitRecord shadow = hit_world_mask(shadowRay, 1u | 4u);
+        float ndl = max(dot(lightingNormal, sunDir), 0.0);
+        if (visible_directional_shadow(shadow) && ndl > 0.0) {
+            vec3 bsdf = eval_brdf(material, wo, sunDir, lightingNormal);
+            sunContribution = bsdf * analytical_sun_center_radiance() * sun_transmittance(rec.p, sunDir) * ndl;
+        }
+    }
+
+    return emissiveContribution + environmentContribution + sunContribution;
+}
+
+vec3 trace_path(Ray ray, uint pixelIndex, ivec2 coords, ivec2 dims, out bool did_hit, out float first_depth, out vec3 first_normal, out vec3 first_position, out PathComponents components) {
+    vec3 radiance = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+    components.direct_light = vec3(0.0);
+    components.indirect_light = vec3(0.0);
+    components.emissive_light = vec3(0.0);
+    components.environment_light = vec3(0.0);
+    components.restir_initial_direct_light = vec3(0.0);
+    components.first_albedo = vec3(1.0);
+    components.first_roughness = 1.0;
+    components.first_light_pdf = 0.0;
+    components.first_bsdf_pdf = 0.0;
+    components.first_mis_weight = 0.0;
+    components.first_direct_sample_type = 0u;
+    components.first_bounce_throughput = vec3(0.0);
+    components.secondary_env_miss = 0.0;
+    components.secondary_env_radiance = vec3(0.0);
+    components.first_local_pos = vec3(0.0);
+    components.bounce_count = 0u;
+    components.traversal_steps = 0u;
+    components.bvh_depth = 0u;
+    components.instance_id = 0xffffffffu;
+    components.mesh_id = 0xffffffffu;
+    components.tlas_steps = 0u;
+    bool previousWasBrdfSample = false;
+    float previousBrdfPdf = 0.0;
+    vec3 previousSampleOrigin = vec3(0.0);
+    did_hit = false;
+    first_depth = 1e30;
+    first_normal = vec3(0.0, 1.0, 0.0);
+    first_position = vec3(0.0);
+
+    uint bounceLimit = camera.path_tracing_enabled != 0u ? max(camera.max_bounces, 1u) : 1u;
+    for (uint bounce = 0u; bounce < bounceLimit; ++bounce) {
+        HitRecord rec = hit_world(ray);
+        components.traversal_steps += rec.traversal_steps;
+        components.tlas_steps += rec.tlas_steps;
+        components.bvh_depth = max(components.bvh_depth, rec.bvh_depth);
+        if (!rec.hit) {
+            vec3 sky = environment_radiance(ray.direction);
+            if (bounce == 0u) {
+                sky *= env_params.background_intensity;
+            }
+            vec3 env = throughput * sky;
+            if (previousWasBrdfSample && env_params.enabled != 0u && debug_params.view != 27u) {
+                float envPdf = environment_pdf(ray.direction);
+                if (envPdf > 1e-6) {
+                    env = throughput * sky * power_heuristic(previousBrdfPdf, envPdf);
+                }
+            }
+            radiance += env;
+            if (bounce > 0u) {
+                components.indirect_light += env;
+            }
+            components.environment_light += env;
+            break;
+        }
+        components.bounce_count += 1u;
+        rec.material = apply_debug_material_mode(rec.material);
+        if (bounce == 0u) {
+            did_hit = true;
+            first_depth = rec.t;
+            first_normal = rec.normal;
+            first_position = rec.p;
+            components.first_local_pos = rec.local_p;
+            components.first_albedo = rec.material.color;
+            components.first_roughness = rec.material.roughness;
+            components.instance_id = rec.instance_id;
+            components.mesh_id = rec.mesh_id;
+        }
+
+        if (bounce == 0u && debug_params.view == 24u) {
+            float testPdf;
+            vec3 testDir = sample_cosine_hemisphere(rec.normal, testPdf);
+            Ray testRay;
+            testRay.origin = rec.p + rec.normal * SHADOW_SELF_HIT_EPSILON;
+            testRay.direction = normalize(testDir);
+            HitRecord testHit = hit_world(testRay);
+            components.secondary_env_miss = testHit.hit ? 0.0 : 1.0;
+            return vec3(components.secondary_env_miss);
+        }
+        if (bounce == 0u && debug_params.view == 26u) {
+            float testPdf;
+            vec3 testDir = sample_cosine_hemisphere(rec.normal, testPdf);
+            Ray testRay;
+            testRay.origin = rec.p + rec.normal * SHADOW_SELF_HIT_EPSILON;
+            testRay.direction = normalize(testDir);
+            HitRecord testHit = hit_world(testRay);
+            components.secondary_env_radiance = testHit.hit ? vec3(0.0) : environment_radiance(testRay.direction);
+            return debug_display_tonemap(components.secondary_env_radiance);
+        }
+
+        if (length(rec.material.emissive) > 0.0) {
+            vec3 emit = throughput * rec.material.emissive;
+            if (previousWasBrdfSample) {
+                float lightPdf = emissive_hit_pdf(rec, previousSampleOrigin);
+                if (lightPdf > 0.0) {
+                    emit *= power_heuristic(previousBrdfPdf, lightPdf);
+                }
+            }
+            radiance += emit;
+            if (bounce > 0u) {
+                components.indirect_light += emit;
+            }
+            components.emissive_light += emit;
+            break;
+        }
+
+        vec3 wo = -ray.direction;
+        vec3 emissiveDirect;
+        vec3 envDirect;
+        float lightPdf;
+        float bsdfPdfForLight;
+        float misWeight;
+        uint directSampleType;
+        vec3 direct = throughput * estimate_direct_lighting(rec, rec.material, wo, emissiveDirect, envDirect, lightPdf, bsdfPdfForLight, misWeight, directSampleType);
+        vec3 shadedDirect = direct;
+        if (bounce == 0u && restir_mode() != 0u) {
+            uint packedFirstVel = compute_surface_velocity(rec.p, rec.local_p, rec.instance_id, dims);
+            RestirReservoir previousReservoir;
+            bool reprojectionValid = false;
+            if (packedFirstVel != 0u) {
+                vec2 firstVel = restir_unpack_velocity_pixels(packedFirstVel);
+                ivec2 reprojected = ivec2(round(vec2(coords) - firstVel));
+                ivec2 clampedReprojected = clamp(reprojected, ivec2(0), dims - ivec2(1));
+                uint reprojectedIndex = uint(clampedReprojected.y) * uint(dims.x) + uint(clampedReprojected.x);
+                previousReservoir = previous_restir_reservoirs[reprojectedIndex];
+                reprojectionValid = length(firstVel) < float(max(dims.x, dims.y)) * 0.5;
+            } else {
+                previousReservoir = previous_restir_reservoirs[pixelIndex];
+            }
+            bool previousReservoirValid = previousReservoir.metadata.z != 0u &&
+                previousReservoir.sample_value_confidence.a > 0.0 &&
+                previousReservoir.target_pdf_weight_sum_m.z > 0.0 &&
+                reprojectionValid;
+            bool useRestir = restir_mode() == 1u || (restir_mode() == 2u && coords.x >= dims.x / 2);
+            if (useRestir && previousReservoirValid) {
+                shadedDirect = previousReservoir.sample_value_confidence.rgb;
+            }
+        }
+        radiance += shadedDirect;
+        if (bounce == 0u) {
+            components.direct_light += shadedDirect;
+            components.restir_initial_direct_light += direct;
+            components.first_light_pdf = lightPdf;
+            components.first_bsdf_pdf = bsdfPdfForLight;
+            components.first_mis_weight = misWeight;
+            components.first_direct_sample_type = directSampleType;
+        } else {
+            components.indirect_light += shadedDirect;
+        }
+        components.emissive_light += throughput * emissiveDirect;
+        components.environment_light += throughput * envDirect;
+
+        if (camera.path_tracing_enabled == 0u) {
+            vec3 previewNormal = normalize(rec.light_normal);
+            vec3 previewAmbient = throughput * fast_preview_ambient(rec.material, previewNormal);
+            vec3 previewSun = vec3(0.0);
+            if (camera.sunlight_enabled != 0u && camera.direct_lighting_enabled != 0u) {
+                vec3 sunDir = analytical_sun_direction();
+                float ndl = max(dot(previewNormal, sunDir), 0.0);
+                previewSun = throughput * rec.material.color * (1.0 / PI) * analytical_sun_center_radiance() * sun_transmittance(rec.p, sunDir) * ndl;
+            }
+            radiance += previewSun;
+            components.direct_light += previewSun;
+            radiance += previewAmbient;
+            components.indirect_light += previewAmbient;
+            break;
+        }
+
+        previousWasBrdfSample = false;
+        previousBrdfPdf = 0.0;
+
+        if (rec.material.mat_type == 1u) {
+            vec3 reflected = reflect(ray.direction, rec.normal);
+            ray.origin = rec.p + rec.normal * 0.001;
+            ray.direction = normalize(reflected + rec.material.roughness * rand_unit_vector());
+            if (dot(ray.direction, rec.normal) <= 0.0) {
+                break;
+            }
+            throughput *= rec.material.color * camera.indirect_strength;
+            if (bounce == 0u) {
+                components.first_bounce_throughput = throughput;
+            }
+        } else if (rec.material.mat_type == 2u) {
+            float refractionRatio = rec.front_face ? (1.0 / max(rec.material.ior, 1.01)) : max(rec.material.ior, 1.01);
+            vec3 unitDirection = normalize(ray.direction);
+            float cosTheta = min(dot(-unitDirection, rec.normal), 1.0);
+            float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+            bool cannotRefract = refractionRatio * sinTheta > 1.0;
+            vec3 scatteredDirection;
+            if (cannotRefract || reflectance(cosTheta, refractionRatio) > rand_f32()) {
+                scatteredDirection = reflect(unitDirection, rec.normal);
+            } else {
+                scatteredDirection = refract(unitDirection, rec.normal, refractionRatio);
+            }
+            ray.direction = normalize(scatteredDirection);
+            ray.origin = rec.p + (dot(ray.direction, rec.normal) > 0.0 ? rec.normal : -rec.normal) * 0.001;
+            throughput *= rec.material.color * camera.indirect_strength;
+            if (bounce == 0u) {
+                components.first_bounce_throughput = throughput;
+            }
+        } else {
+            float bsdfPdf;
+            vec3 wi = sample_brdf(rec.material, wo, rec.normal, bsdfPdf);
+            float cosTheta = max(dot(rec.normal, wi), 0.0);
+            if (bsdfPdf < 1e-6 || cosTheta <= 0.0) {
+                break;
+            }
+            vec3 bsdf = eval_brdf(rec.material, wo, wi, rec.normal);
+            ray.origin = rec.p + rec.normal * 0.001;
+            ray.direction = normalize(wi);
+            previousWasBrdfSample = true;
+            previousBrdfPdf = bsdfPdf;
+            previousSampleOrigin = ray.origin;
+            throughput *= bsdf * cosTheta / max(bsdfPdf, 1e-6) * camera.indirect_strength;
+            if (bounce == 0u) {
+                components.first_bounce_throughput = throughput;
+            }
+        }
+
+        if (bounce > 2u && debug_params.view != 27u) {
+            float p = clamp(max(max(throughput.r, throughput.g), throughput.b), 0.05, 0.95);
+            if (rand_f32() > p) {
+                break;
+            }
+            throughput /= p;
+        }
+    }
+    return radiance;
+}
+
+void main() {
+    ivec2 coords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dims = imageSize(output_color);
+    if (coords.x >= dims.x || coords.y >= dims.y) {
+        return;
+    }
+
+    uint pixel_index = uint(coords.y * dims.x + coords.x);
+    rng_state = pcg_hash(pixel_index + camera.frame_count * 9781u);
+
+    vec2 jitter = camera.path_tracing_enabled != 0u ? vec2(0.5) + camera.jitter.xy : vec2(0.5);
+    vec2 uv = (vec2(coords) + jitter) / vec2(dims);
+    vec2 ndc = uv * 2.0 - 1.0;
+    float aspect = float(dims.x) / float(dims.y);
+    float scale = tan(camera.fov_y * 0.5);
+
+    Ray ray;
+    ray.origin = camera.pos.xyz;
+    ray.direction = normalize(camera.forward.xyz + camera.right.xyz * ndc.x * aspect * scale - camera.up.xyz * ndc.y * scale);
+
+    bool did_hit;
+    float hit_depth;
+    vec3 hit_normal;
+    vec3 hit_position;
+    PathComponents components;
+    vec3 sample_color = trace_path(ray, pixel_index, coords, dims, did_hit, hit_depth, hit_normal, hit_position, components);
+    vec4 previous = (camera.frame_count <= 1u || camera.path_tracing_enabled == 0u) ? vec4(0.0) : accumulation_buffer[pixel_index];
+    vec3 previous_average = previous.rgb / max(previous.a, 1.0);
+    sample_color = clamp_firefly_sample(sample_color, previous_average, camera.frame_count);
+    vec4 accumulated = previous + vec4(sample_color, 1.0);
+    accumulation_buffer[pixel_index] = accumulated;
+    vec3 average = camera.path_tracing_enabled != 0u ? accumulated.rgb / max(accumulated.a, 1.0) : sample_color;
+
+    float lum = dot(sample_color, vec3(0.2126, 0.7152, 0.0722));
+    float avgLum = dot(average, vec3(0.2126, 0.7152, 0.0722));
+    variance_buffer[pixel_index] = pack_variance(abs(lum - avgLum));
+    depth_normal_buffer[pixel_index] = pack_depth_normal(hit_depth, hit_normal);
+    world_position_buffer[pixel_index] = did_hit ? pack_world_position(hit_position) : uvec2(0u);
+    uint packedVelocity = did_hit
+        ? compute_surface_velocity(hit_position, components.first_local_pos, components.instance_id, dims)
+        : compute_sky_velocity(ray.direction, dims);
+    velocity_buffer[pixel_index] = packedVelocity;
+    store_initial_restir_reservoir(pixel_index, coords, dims, packedVelocity, components);
+
+    vec2 pick_uv = (vec2(coords) + vec2(0.5)) / vec2(dims);
+    vec2 pick_ndc = pick_uv * 2.0 - 1.0;
+    Ray pick_ray;
+    pick_ray.origin = camera.pos.xyz;
+    pick_ray.direction = normalize(camera.forward.xyz + camera.right.xyz * pick_ndc.x * aspect * scale - camera.up.xyz * pick_ndc.y * scale);
+    picking_ray = true;
+    HitRecord pick_hit = hit_world(pick_ray);
+    picking_ray = false;
+    entity_id_buffer[pixel_index] = pick_hit.hit ? pick_hit.instance_id : 0xffffffffu;
+
+    vec3 output_value = average;
+    if (debug_params.view == 5u) {
+        output_value = vec3(clamp(hit_depth / 8.0, 0.0, 1.0));
+    } else if (debug_params.view == 6u) {
+        output_value = vec3(components.first_roughness);
+    } else if (debug_params.view == 7u) {
+        output_value = components.direct_light * debug_params.scale;
+    } else if (debug_params.view == 8u) {
+        output_value = components.indirect_light * debug_params.scale;
+    } else if (debug_params.view == 9u) {
+        output_value = components.emissive_light * debug_params.scale;
+    } else if (debug_params.view == 10u) {
+        output_value = components.environment_light * debug_params.scale;
+    } else if (debug_params.view == 11u) {
+        output_value = vec3(clamp(float(components.traversal_steps) / 48.0, 0.0, 1.0));
+    } else if (debug_params.view == 12u) {
+        float depth_vis = did_hit ? max(0.12, clamp(float(components.bvh_depth + 1u) / 8.0, 0.0, 1.0)) : 0.0;
+        float table_tint = mesh_params.instance_count > 1u
+            ? clamp(float(first_scene_table_primitive_count() + first_mesh_record_primitive_count() + first_scene_table_triangle_count()) / 32.0, 0.0, 0.18) + first_local_geometry_tint() + first_instance_bounds_tint() + first_mesh_bvh_tint()
+            : 0.0;
+        output_value = vec3(depth_vis + table_tint, depth_vis * 0.55, 1.0 - depth_vis) * depth_vis;
+    } else if (debug_params.view == 13u) {
+        output_value = did_hit && components.instance_id != 0xffffffffu ? id_color(components.instance_id) : vec3(0.0);
+    } else if (debug_params.view == 14u) {
+        output_value = did_hit && components.mesh_id != 0xffffffffu ? id_color(components.mesh_id) : vec3(0.0);
+    } else if (debug_params.view == 15u) {
+        output_value = vec3(clamp(float(components.tlas_steps) / 24.0, 0.0, 1.0));
+    } else if (debug_params.view == 16u) {
+        if (mesh_params.bvh_node_count == 0u) {
+            output_value = vec3(0.0);
+        } else {
+            HitRecord tlasHit = hit_instance_scene(ray, 0.0001, 1e30, 1u | 2u);
+            HitRecord flatHit = hit_bvh(ray, 0.0001, 1e30);
+            bool hitMismatch = tlasHit.hit != flatHit.hit;
+            float depthDelta = tlasHit.hit && flatHit.hit ? abs(tlasHit.t - flatHit.t) : 0.0;
+            float normalDelta = tlasHit.hit && flatHit.hit ? length(tlasHit.normal - flatHit.normal) : 0.0;
+            float materialDelta = tlasHit.hit && flatHit.hit && length(tlasHit.material.color - flatHit.material.color) > 0.05 ? 1.0 : 0.0;
+            output_value = vec3(
+                hitMismatch ? 1.0 : clamp(depthDelta * 25.0, 0.0, 1.0),
+                clamp(normalDelta, 0.0, 1.0),
+                materialDelta);
+        }
+    } else if (debug_params.view == 17u) {
+        output_value = vec3(clamp(log2(max(components.first_light_pdf, 0.0) + 1.0) / 8.0, 0.0, 1.0));
+    } else if (debug_params.view == 18u) {
+        output_value = vec3(clamp(log2(max(components.first_bsdf_pdf, 0.0) + 1.0) / 8.0, 0.0, 1.0));
+    } else if (debug_params.view == 19u) {
+        output_value = vec3(clamp(components.first_mis_weight, 0.0, 1.0));
+    } else if (debug_params.view == 20u) {
+        output_value = components.first_direct_sample_type == 1u
+            ? vec3(1.0, 0.45, 0.05)
+            : (components.first_direct_sample_type == 2u ? vec3(0.05, 0.45, 1.0) : vec3(0.0));
+    } else if (debug_params.view == 21u) {
+        output_value = did_hit ? components.first_albedo : vec3(0.0);
+    } else if (debug_params.view == 23u) {
+        output_value = components.first_bounce_throughput;
+    } else if (debug_params.view == 24u) {
+        output_value = vec3(components.secondary_env_miss);
+    } else if (debug_params.view == 25u) {
+        output_value = vec3(float(components.bounce_count) / max(float(camera.max_bounces), 1.0));
+    } else if (debug_params.view == 26u) {
+        output_value = debug_display_tonemap(components.secondary_env_radiance);
+    } else if (debug_params.view == 29u) {
+        output_value = debug_display_tonemap(atmosphere_sky_radiance(ray.direction) * max(debug_params.scale, 1.0));
+    } else if (debug_params.view == 30u) {
+        vec3 transmittance = sample_atmosphere_transmittance_lut(camera.pos.xyz, ray.direction);
+        output_value = pow(clamp(transmittance, vec3(0.0), vec3(1.0)), vec3(2.0));
+    } else if (debug_params.view == 31u) {
+        float viewMu = clamp(normalize(ray.direction).y, -0.15, 1.0);
+        vec2 lutUv = vec2(0.8, clamp((viewMu + 0.15) / 1.15, 0.0, 1.0));
+        vec4 aerial = texture(sampler2D(atmosphere_aerial_perspective_lut, atmosphere_sampler), lutUv);
+        output_value = debug_display_tonemap((aerial.rgb + vec3(1.0 - aerial.a) * 0.15) * max(debug_params.scale, 1.0) * 3.0);
+    } else if (debug_params.view == 32u) {
+        vec3 multiScatter = sample_multi_scatter_lut_debug(ray.direction);
+        output_value = debug_display_tonemap(multiScatter * max(debug_params.scale, 1.0) * 8.0);
+    } else if (debug_params.view == 35u) {
+        output_value = vec3(clamp(float(restir_reservoirs[pixel_index].metadata.y) / 32.0, 0.0, 1.0));
+    } else if (debug_params.view == 36u) {
+        output_value = vec3(clamp(restir_reservoirs[pixel_index].sample_value_confidence.a, 0.0, 1.0));
+    } else if (debug_params.view == 37u) {
+        output_value = vec3(clamp(restir_reservoirs[pixel_index].target_pdf_weight_sum_m.z, 0.0, 1.0));
+    }
+    imageStore(output_color, coords, vec4(output_value, 1.0));
+}
