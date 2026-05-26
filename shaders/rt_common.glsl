@@ -40,6 +40,14 @@ layout(set = 0, binding = 4, std430) buffer DepthNormalBuffer { uvec4 depth_norm
 layout(set = 0, binding = 5, std430) buffer WorldPositionBuffer { uvec2 world_position_buffer[]; };
 layout(set = 0, binding = 35, std430) buffer EntityIdBuffer { uint entity_id_buffer[]; };
 layout(set = 0, binding = 36, std430) buffer VelocityBuffer { uint velocity_buffer[]; };
+struct PathDataRecord {
+    vec4 direct_diffuse;
+    vec4 direct_specular;
+    vec4 indirect_diffuse;
+    vec4 indirect_specular;
+    vec4 albedo_roughness_hit_confidence;
+};
+layout(set = 0, binding = 42, std430) buffer PathDataBuffer { PathDataRecord path_data_buffer[]; };
 layout(set = 0, binding = 37, std140) uniform PrevCamera {
     mat4 view_proj;
     mat4 inv_view_proj;

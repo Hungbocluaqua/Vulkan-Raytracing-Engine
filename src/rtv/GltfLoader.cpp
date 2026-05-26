@@ -558,6 +558,35 @@ SceneAsset GltfLoader::load(const std::filesystem::path& path) {
         }
     }
 
+    for (size_t i = 0; i < model.lights.size(); ++i) {
+        const tinygltf::Light& srcLight = model.lights[i];
+        SceneLightAsset light;
+        light.color = srcLight.color.size() >= 3
+            ? glm::vec3(static_cast<float>(srcLight.color[0]),
+                         static_cast<float>(srcLight.color[1]),
+                         static_cast<float>(srcLight.color[2]))
+            : glm::vec3(1.0f);
+        light.intensity = static_cast<float>(srcLight.intensity);
+        if (light.intensity <= 0.0f) {
+            light.intensity = srcLight.type == "directional" ? 1.0f : 100.0f;
+        }
+        light.type = srcLight.type == "directional" ? 0u
+                   : srcLight.type == "spot" ? 2u
+                   : 1u;
+        light.enabled = true;
+        if (srcLight.type == "directional") {
+            light.sizeOrRadius = 0.0f;
+        }
+        for (size_t ni = 0; ni < model.nodes.size(); ++ni) {
+            if (model.nodes[ni].light == static_cast<int>(i)) {
+                light.transform = nodeTransform(model.nodes[ni]);
+                light.nodeIndex = static_cast<int32_t>(ni);
+                break;
+            }
+        }
+        scene.lights.push_back(light);
+    }
+
     const int sceneIndex = model.defaultScene >= 0 ? model.defaultScene : 0;
     if (sceneIndex >= 0 && static_cast<size_t>(sceneIndex) < model.scenes.size()) {
         for (int root : model.scenes[static_cast<size_t>(sceneIndex)].nodes) {

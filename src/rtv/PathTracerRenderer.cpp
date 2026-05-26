@@ -123,6 +123,7 @@ std::vector<VkDescriptorSetLayoutBinding> rayTracingBindings() {
         descriptorBinding(39, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_RAYGEN_BIT_KHR),
         descriptorBinding(40, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, allRt),
         descriptorBinding(41, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, allRt, 1024),
+        descriptorBinding(42, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_RAYGEN_BIT_KHR),
     };
 }
 
@@ -1075,6 +1076,12 @@ void PathTracerRenderer::createResolutionResources(VkExtent2D renderExtent, VkEx
         .persistentMapped = true,
         .debugName = "path entity id pick buffer",
     });
+    pathDataBuffer_.create(allocator_, BufferDesc{
+        .size = pixelCount * sizeof(PathDataGpu),
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .memory = BufferMemory::GpuOnly,
+        .debugName = "path data channels",
+    });
     restirReservoirBuffer_.create(allocator_, BufferDesc{
         .size = pixelCount * sizeof(RestirReservoirGpu),
         .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -1225,7 +1232,9 @@ void PathTracerRenderer::updateCamera() {
         debugParams_.view <= 4u ||
         debugParams_.view == static_cast<uint32_t>(RendererDebugView::MotionVectors) ||
         debugParams_.view == static_cast<uint32_t>(RendererDebugView::TemporalReactiveMask) ||
-        debugParams_.view == static_cast<uint32_t>(RendererDebugView::TemporalHistoryWeight);
+        debugParams_.view == static_cast<uint32_t>(RendererDebugView::TemporalHistoryWeight) ||
+        (debugParams_.view >= static_cast<uint32_t>(RendererDebugView::PathDirectDiffuse) &&
+         debugParams_.view <= static_cast<uint32_t>(RendererDebugView::DenoiserKernelRadius));
     const bool allowDenoiserForDebugView = denoiserDebugView;
     const bool stablePreview = shouldRunTaa();
     const bool allowDenoiserWhileMoving = settings_.denoiseWhileMoving || stablePreview || !cameraChangedThisFrame_;
@@ -1383,6 +1392,7 @@ void PathTracerRenderer::recordPathTraceGraph(VkCommandBuffer commandBuffer) {
     const RenderGraphResourceId worldPosition = graph.createBuffer(bufferResource(worldPositionBuffer_, "world position"));
     const RenderGraphResourceId entityIds = graph.createBuffer(bufferResource(entityIdBuffer_, "entity ids"));
     const RenderGraphResourceId velocity = graph.createBuffer(bufferResource(velocityBuffer_, "screen velocity"));
+    const RenderGraphResourceId pathData = graph.createBuffer(bufferResource(pathDataBuffer_, "path data"));
     const RenderGraphResourceId restirReservoir = graph.createBuffer(bufferResource(restirReservoirBuffer_, "restir reservoir"));
     const RenderGraphResourceId previousRestirReservoir = graph.createBuffer(bufferResource(previousRestirReservoirBuffer_, "previous restir reservoir"));
     const PipelineDomain traceDomain = PipelineDomain::RayTracing;
@@ -1394,6 +1404,7 @@ void PathTracerRenderer::recordPathTraceGraph(VkCommandBuffer commandBuffer) {
         .addStorageWrite(depthNormal, traceDomain)
         .addStorageWrite(worldPosition, traceDomain)
         .addStorageWrite(velocity, traceDomain)
+        .addStorageWrite(pathData, traceDomain)
         .addStorageRead(previousRestirReservoir, traceDomain)
         .addStorageWrite(restirReservoir, traceDomain)
         .setExecuteCallback([this](FrameGraphContext&, VkCommandBuffer cmd) {
@@ -1604,6 +1615,7 @@ void PathTracerRenderer::recordRenderGraphPlan() {
     const RenderGraphResourceId worldPosition = graph.createBuffer(bufferResource(worldPositionBuffer_, "world position"));
     const RenderGraphResourceId previousWorldPosition = graph.createBuffer(bufferResource(previousWorldPositionBuffer_, "previous world position"));
     const RenderGraphResourceId velocity = graph.createBuffer(bufferResource(velocityBuffer_, "screen velocity"));
+    const RenderGraphResourceId pathData = graph.createBuffer(bufferResource(pathDataBuffer_, "path data"));
     const RenderGraphResourceId restirReservoir = graph.createBuffer(bufferResource(restirReservoirBuffer_, "restir reservoir"));
     const RenderGraphResourceId previousRestirReservoir = graph.createBuffer(bufferResource(previousRestirReservoirBuffer_, "previous restir reservoir"));
     const RenderGraphResourceId restirSpatialReservoir = graph.createBuffer(bufferResource(restirSpatialReservoirBuffer_, "restir spatial reservoir"));
@@ -1617,6 +1629,7 @@ void PathTracerRenderer::recordRenderGraphPlan() {
         .addStorageWrite(depthNormal, traceDomain)
         .addStorageWrite(worldPosition, traceDomain)
         .addStorageWrite(velocity, traceDomain)
+        .addStorageWrite(pathData, traceDomain)
         .addStorageRead(previousRestirReservoir, traceDomain)
         .addStorageWrite(restirReservoir, traceDomain);
 
@@ -1643,6 +1656,7 @@ void PathTracerRenderer::recordRenderGraphPlan() {
             .addStorageRead(worldPosition, PipelineDomain::Compute)
             .addStorageRead(previousWorldPosition, PipelineDomain::Compute)
             .addStorageRead(velocity, PipelineDomain::Compute)
+            .addStorageRead(pathData, PipelineDomain::Compute)
             .addStorageWrite(denoised, PipelineDomain::Compute);
         graph.addPass("history_copy")
             .addStorageRead(denoised, PipelineDomain::Transfer)
@@ -1765,6 +1779,7 @@ void PathTracerRenderer::recordHardwarePathTrace(VkCommandBuffer commandBuffer) 
         .writeBuffer(38, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, restirReservoirBuffer_.descriptorInfo())
         .writeBuffer(39, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, previousRestirReservoirBuffer_.descriptorInfo())
         .writeBuffer(40, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, scene_.lightBvhNodes().descriptorInfo())
+        .writeBuffer(42, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pathDataBuffer_.descriptorInfo())
         .update(context_.device(), set);
     DescriptorWriter()
         .writeImage(0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, atmosphereLutSystem_->transmittanceLut().sampledDescriptor(VK_NULL_HANDLE))
@@ -1903,6 +1918,7 @@ void PathTracerRenderer::recordDenoiser(VkCommandBuffer commandBuffer) {
     const RenderGraphResourceId worldPosition = graph.createBuffer(bufferResource(worldPositionBuffer_, "world position"));
     const RenderGraphResourceId previousWorldPosition = graph.createBuffer(bufferResource(previousWorldPositionBuffer_, "previous world position"));
     const RenderGraphResourceId velocity = graph.createBuffer(bufferResource(velocityBuffer_, "screen velocity"));
+    const RenderGraphResourceId pathData = graph.createBuffer(bufferResource(pathDataBuffer_, "path data"));
     graph.resources()[raw.index].hasInitialAccess = true;
     graph.resources()[raw.index].initialAccess = ResourceAccess{
         .stage = pathTraceShaderStage(),
@@ -1941,6 +1957,11 @@ void PathTracerRenderer::recordDenoiser(VkCommandBuffer commandBuffer) {
         .stage = pathTraceShaderStage(),
         .access = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
     };
+    graph.resources()[pathData.index].hasInitialAccess = true;
+    graph.resources()[pathData.index].initialAccess = ResourceAccess{
+        .stage = pathTraceShaderStage(),
+        .access = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+    };
 
     graph.addPass("temporal_denoiser")
         .addStorageReadWrite(raw, PipelineDomain::Compute)
@@ -1950,6 +1971,7 @@ void PathTracerRenderer::recordDenoiser(VkCommandBuffer commandBuffer) {
         .addStorageRead(worldPosition, PipelineDomain::Compute)
         .addStorageRead(previousWorldPosition, PipelineDomain::Compute)
         .addStorageRead(velocity, PipelineDomain::Compute)
+        .addStorageRead(pathData, PipelineDomain::Compute)
         .addStorageWrite(denoised, PipelineDomain::Compute)
         .setExecuteCallback([this](FrameGraphContext&, VkCommandBuffer cmd) {
             recordDenoiserPass(cmd);
@@ -1978,6 +2000,7 @@ void PathTracerRenderer::recordDenoiserPass(VkCommandBuffer commandBuffer) {
         .writeBuffer(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, previousWorldPositionBuffer_.descriptorInfo())
         .writeBuffer(8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, currentFrame_->uniformRing().descriptorInfo(kFramePrevCameraUniformOffset, sizeof(PrevCameraUniform)))
         .writeBuffer(9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, velocityBuffer_.descriptorInfo())
+        .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, pathDataBuffer_.descriptorInfo())
         .update(context_.device(), set);
 
     denoiserPipeline_->bind(commandBuffer);
@@ -2147,6 +2170,10 @@ bool PathTracerRenderer::shouldRunDenoiser() const {
     }
     if (denoiserParams_.debugView == static_cast<uint32_t>(RendererDebugView::TemporalReactiveMask) ||
         denoiserParams_.debugView == static_cast<uint32_t>(RendererDebugView::TemporalHistoryWeight)) {
+        return true;
+    }
+    if (denoiserParams_.debugView >= static_cast<uint32_t>(RendererDebugView::PathDirectDiffuse) &&
+        denoiserParams_.debugView <= static_cast<uint32_t>(RendererDebugView::DenoiserKernelRadius)) {
         return true;
     }
     return false;

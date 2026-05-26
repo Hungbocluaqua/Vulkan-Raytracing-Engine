@@ -209,7 +209,9 @@ void SceneDocument::importSceneAsset(const SceneAsset& scene) {
 
     for (uint32_t i = 0; i < scene.lights.size(); ++i) {
         const SceneLightAsset& source = scene.lights[i];
-        EntityId id = registry_.createEntity("Light " + std::to_string(i));
+        EntityId id = source.nodeIndex >= 0 && static_cast<uint32_t>(source.nodeIndex) < nodeEntities.size()
+            ? nodeEntities[static_cast<uint32_t>(source.nodeIndex)]
+            : registry_.createEntity("Light " + std::to_string(i));
         Entity* entity = registry_.entity(id);
         if (entity == nullptr) {
             continue;
@@ -228,6 +230,44 @@ void SceneDocument::importSceneAsset(const SceneAsset& scene) {
 
     (void)SunController::migrateLegacyDirectionalSun(*this);
     (void)SunController::repairPrimarySunTransform(*this);
+
+    std::unordered_map<std::string, EntityId> entitiesByName;
+    for (size_t i = 0; i < scene.nodes.size(); ++i) {
+        if (const Entity* e = registry_.entity(nodeEntities[i]); e != nullptr && !e->name.empty()) {
+            entitiesByName[e->name] = nodeEntities[i];
+        }
+    }
+    for (uint32_t i = 0; i < scene.nodes.size(); ++i) {
+        Entity* entity = registry_.entity(nodeEntities[i]);
+        if (entity == nullptr) continue;
+        const std::string& name = entity->name;
+        constexpr size_t targetSuffixLen = 7;
+        if (name.size() > targetSuffixLen && name.compare(name.size() - targetSuffixLen, targetSuffixLen, ".Target") == 0) {
+            std::string baseName = name.substr(0, name.size() - targetSuffixLen);
+            auto it = entitiesByName.find(baseName);
+            if (it != entitiesByName.end()) {
+                Entity* refEntity = registry_.entity(it->second);
+                if (refEntity == nullptr) continue;
+                glm::vec3 forward = glm::normalize(entity->transform.position - refEntity->transform.position);
+                if (refEntity->camera.has_value()) {
+                    glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+                    glm::vec3 up = glm::cross(forward, right);
+                    glm::mat3 rot;
+                    rot[0] = right;
+                    rot[1] = up;
+                    rot[2] = -forward;
+                    refEntity->transform.rotationEuler = glm::eulerAngles(glm::quat_cast(rot));
+                } else if (refEntity->sun.has_value()) {
+                    float elevation = 0.0f;
+                    float azimuth = 0.0f;
+                    SunController::anglesFromDirection(-forward, elevation, azimuth);
+                    refEntity->transform = SunController::transformFromWorldAngles(
+                        registry_, *refEntity, refEntity->transform, elevation, azimuth);
+                }
+            }
+        }
+    }
+
     clearDirty();
     markDirty(SceneUpdateKind::TopologyChanged);
 }

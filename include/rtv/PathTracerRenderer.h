@@ -219,6 +219,14 @@ private:
         glm::vec4 targetPdfWeightSumM{};
     };
 
+    struct PathDataGpu {
+        glm::vec4 directDiffuse{};
+        glm::vec4 directSpecular{};
+        glm::vec4 indirectDiffuse{};
+        glm::vec4 indirectSpecular{};
+        glm::vec4 albedoRoughnessHitConfidence{};
+    };
+
     void createResolutionResources(VkExtent2D renderExtent, VkExtent2D displayExtent);
     void updateCamera();
     void recordPathTraceGraph(VkCommandBuffer commandBuffer);
@@ -305,6 +313,7 @@ private:
     Buffer previousWorldPositionBuffer_;
     Buffer velocityBuffer_;
     Buffer entityIdBuffer_;
+    Buffer pathDataBuffer_;
     Buffer restirReservoirBuffer_;
     Buffer previousRestirReservoirBuffer_;
     Buffer restirSpatialReservoirBuffer_;

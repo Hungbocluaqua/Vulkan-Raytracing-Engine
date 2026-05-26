@@ -90,6 +90,7 @@ struct SceneLightAsset {
     float intensity = 1.0f;
     float sizeOrRadius = 1.0f;
     bool enabled = true;
+    int32_t nodeIndex = -1;
 };
 
 struct SceneAsset {

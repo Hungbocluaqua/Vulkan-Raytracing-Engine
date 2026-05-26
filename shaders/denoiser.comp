@@ -29,6 +29,14 @@ layout(set = 0, binding = 5, std140) uniform DenoiserParams {
 layout(set = 0, binding = 6, std430) readonly buffer WorldPosition { uvec2 world_position[]; };
 layout(set = 0, binding = 7, std430) readonly buffer PrevWorldPosition { uvec2 prev_world_position[]; };
 layout(set = 0, binding = 9, std430) readonly buffer VelocityBuffer { uint velocity_buffer[]; };
+struct PathDataRecord {
+    vec4 direct_diffuse;
+    vec4 direct_specular;
+    vec4 indirect_diffuse;
+    vec4 indirect_specular;
+    vec4 albedo_roughness_hit_confidence;
+};
+layout(set = 0, binding = 10, std430) readonly buffer PathDataBuffer { PathDataRecord path_data_buffer[]; };
 
 layout(set = 0, binding = 8, std140) uniform PrevCamera {
     mat4 view_proj;
@@ -233,6 +241,7 @@ void main() {
     vec4 center_dn = decode_depth_normal(input_depth_normal[pixel_index]);
     float center_depth = center_dn.r;
     vec3 center_normal = center_dn.gba;
+    float center_roughness = clamp(uintBitsToFloat(input_depth_normal[pixel_index].z), 0.0, 1.0);
     float center_var = decode_variance(input_variance[pixel_index]);
 
     if (params.enabled == 0u && params.debug_view == 0u) {
@@ -246,6 +255,7 @@ void main() {
     float sigma_color = (0.18 + var_factor * 1.8) * inv_strength;
     float sigma_depth = (0.12 + var_factor * 0.45) * inv_strength;
     float sigma_normal = 0.42 * inv_strength;
+    int adaptive_kernel_radius = int(clamp(ceil(mix(1.0, 2.0, max(center_roughness, clamp(center_var / 4.0, 0.0, 1.0)))), 1.0, 2.0));
     uint iterations = clamp(params.atrous_iterations, 1u, 5u);
 
     vec3 filtered_color = center_color;
@@ -269,6 +279,9 @@ void main() {
 
         for (int ky = -2; ky <= 2; ++ky) {
             for (int kx = -2; kx <= 2; ++kx) {
+                if (abs(kx) > adaptive_kernel_radius || abs(ky) > adaptive_kernel_radius) {
+                    continue;
+                }
                 ivec2 sample_coords = coords + ivec2(kx * step_width, ky * step_width);
                 if (sample_coords.x < 0 || sample_coords.x >= dims.x || sample_coords.y < 0 || sample_coords.y >= dims.y) {
                     continue;
@@ -379,6 +392,7 @@ void main() {
     float denoiser_rejection = 1.0 - clamp(disocclusion_confidence * motion_confidence * specular_rejection, 0.0, 1.0);
 
     vec3 debug_color = filtered_color;
+    PathDataRecord path_data = path_data_buffer[pixel_index];
     if (params.debug_view == 1u) {
         debug_color = vec3(center_var / 4.0);
     } else if (params.debug_view == 2u) {
@@ -394,6 +408,23 @@ void main() {
         debug_color = vec3(reactive_mask, 1.0 - reactive_mask, 0.0);
     } else if (params.debug_view == 34u) {
         debug_color = vec3(history_weight);
+    } else if (params.debug_view == 47u) {
+        debug_color = path_data.direct_diffuse.rgb;
+    } else if (params.debug_view == 48u) {
+        debug_color = path_data.direct_specular.rgb;
+    } else if (params.debug_view == 49u) {
+        debug_color = path_data.indirect_diffuse.rgb;
+    } else if (params.debug_view == 50u) {
+        debug_color = path_data.indirect_specular.rgb;
+    } else if (params.debug_view == 51u) {
+        debug_color = path_data.albedo_roughness_hit_confidence.rgb;
+    } else if (params.debug_view == 52u) {
+        debug_color = vec3(
+            clamp(path_data.albedo_roughness_hit_confidence.w, 0.0, 1.0),
+            clamp(log2(path_data.direct_specular.a + 1.0) / 10.0, 0.0, 1.0),
+            clamp(path_data.indirect_diffuse.a, 0.0, 1.0));
+    } else if (params.debug_view == 53u) {
+        debug_color = vec3(float(adaptive_kernel_radius) / 2.0);
     }
 
     vec3 denoised = params.debug_view == 0u ? mix(filtered_color, history, history_weight) : debug_color;

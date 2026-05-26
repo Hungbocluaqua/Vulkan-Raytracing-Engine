@@ -62,6 +62,13 @@ enum class RendererDebugView : uint32_t {
     RisPdfRatio = 44,
     SampleDimension = 45,
     SampleScramble = 46,
+    PathDirectDiffuse = 47,
+    PathDirectSpecular = 48,
+    PathIndirectDiffuse = 49,
+    PathIndirectSpecular = 50,
+    PathDataAlbedo = 51,
+    PathDataMetrics = 52,
+    DenoiserKernelRadius = 53,
 };
 
 enum class RestirMode : uint32_t {

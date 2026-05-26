@@ -76,6 +76,13 @@ RendererDebugView parseRendererDebugView(std::string_view value) {
     if (key == "rispdfratio" || key == "risratio") { return RendererDebugView::RisPdfRatio; }
     if (key == "sampledimension" || key == "sampledimensions" || key == "samplingdimension") { return RendererDebugView::SampleDimension; }
     if (key == "samplescramble" || key == "samplescrambling" || key == "scramble") { return RendererDebugView::SampleScramble; }
+    if (key == "pathdirectdiffuse" || key == "directdiffuse") { return RendererDebugView::PathDirectDiffuse; }
+    if (key == "pathdirectspecular" || key == "directspecular") { return RendererDebugView::PathDirectSpecular; }
+    if (key == "pathindirectdiffuse" || key == "indirectdiffuse") { return RendererDebugView::PathIndirectDiffuse; }
+    if (key == "pathindirectspecular" || key == "indirectspecular") { return RendererDebugView::PathIndirectSpecular; }
+    if (key == "pathdataalbedo" || key == "pathalbedo") { return RendererDebugView::PathDataAlbedo; }
+    if (key == "pathdatametrics" || key == "pathmetrics" || key == "hitconfidence" || key == "hitdistance") { return RendererDebugView::PathDataMetrics; }
+    if (key == "denoiserkernelradius" || key == "kernelradius" || key == "filterradius") { return RendererDebugView::DenoiserKernelRadius; }
     if (key == "directsample" || key == "directsampletype" || key == "sampletype") { return RendererDebugView::DirectSampleType; }
     if (key == "albedo" || key == "basecolor" || key == "basecolour") { return RendererDebugView::Albedo; }
     if (key == "clay" || key == "claymaterial" || key == "balancedclay" || key == "balancedclaymaterial" ||
@@ -177,6 +184,13 @@ const char* rendererDebugViewName(RendererDebugView view) {
     case RendererDebugView::RisPdfRatio: return "ris-pdf-ratio";
     case RendererDebugView::SampleDimension: return "sample-dimension";
     case RendererDebugView::SampleScramble: return "sample-scramble";
+    case RendererDebugView::PathDirectDiffuse: return "path-direct-diffuse";
+    case RendererDebugView::PathDirectSpecular: return "path-direct-specular";
+    case RendererDebugView::PathIndirectDiffuse: return "path-indirect-diffuse";
+    case RendererDebugView::PathIndirectSpecular: return "path-indirect-specular";
+    case RendererDebugView::PathDataAlbedo: return "path-data-albedo";
+    case RendererDebugView::PathDataMetrics: return "path-data-metrics";
+    case RendererDebugView::DenoiserKernelRadius: return "denoiser-kernel-radius";
     }
     return "beauty";
 }

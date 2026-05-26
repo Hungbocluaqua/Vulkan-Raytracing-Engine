@@ -34,6 +34,7 @@ struct PathComponents {
     float ris_raw_light_pdf;
     float ris_effective_light_pdf;
     float ris_pdf_ratio;
+    float first_specular_probability;
     vec3 first_local_pos;
     uint bounce_count;
     uint instance_id;
@@ -515,6 +516,7 @@ vec3 trace_path(Ray ray, inout uint rng, uint pixelIndex, ivec2 coords, ivec2 di
     components.ris_raw_light_pdf = 0.0;
     components.ris_effective_light_pdf = 0.0;
     components.ris_pdf_ratio = 0.0;
+    components.first_specular_probability = 0.0;
     components.first_local_pos = vec3(0.0);
     components.bounce_count = 0u;
     components.instance_id = 0xffffffffu;
@@ -578,6 +580,7 @@ vec3 trace_path(Ray ray, inout uint rng, uint pixelIndex, ivec2 coords, ivec2 di
             components.first_local_pos = hit.local_pos;
             components.first_albedo = material.color;
             components.first_roughness = material.roughness;
+            components.first_specular_probability = pbr_specular_sample_probability(material, max(dot(hit.normal, -ray.direction), 0.0));
             components.instance_id = hit.instance_id;
             components.mesh_id = hit.mesh_id;
         }
@@ -849,6 +852,20 @@ void main() {
     variance_buffer[pixel_index] = pack_variance(abs(lum - avgLum));
     depth_normal_buffer[pixel_index] = pack_depth_normal(hit_depth, hit_normal, components.first_roughness);
     world_position_buffer[pixel_index] = did_hit ? pack_world_position(hit_position) : uvec2(0u);
+    float pathSpecularWeight = clamp(components.first_specular_probability, 0.0, 1.0);
+    float pathDiffuseWeight = 1.0 - pathSpecularWeight;
+    float confidence = did_hit
+        ? clamp(1.0 - abs(lum - avgLum) / (max(max(lum, avgLum), 0.0) + 1.0), 0.0, 1.0)
+        : 0.0;
+    PathDataRecord pathData;
+    pathData.direct_diffuse = vec4(components.direct_light * pathDiffuseWeight, did_hit ? 1.0 : 0.0);
+    pathData.direct_specular = vec4(components.direct_light * pathSpecularWeight, did_hit ? min(hit_depth, 65504.0) : 65504.0);
+    pathData.indirect_diffuse = vec4((components.indirect_light + components.environment_light) * pathDiffuseWeight, confidence);
+    pathData.indirect_specular = vec4((components.indirect_light + components.environment_light) * pathSpecularWeight, did_hit ? pathSpecularWeight : 0.0);
+    pathData.albedo_roughness_hit_confidence = vec4(
+        did_hit ? components.first_albedo : vec3(0.0),
+        did_hit ? components.first_roughness : 1.0);
+    path_data_buffer[pixel_index] = pathData;
     uint packedVelocity = did_hit
         ? compute_surface_velocity(hit_position, components.first_local_pos, components.instance_id, ivec2(size))
         : compute_sky_velocity(ray.direction, ivec2(size));
@@ -952,6 +969,22 @@ void main() {
             sample_uint_to_unit_float(seed),
             sample_uint_to_unit_float(sample_hash_combine(seed, 17u)),
             sample_uint_to_unit_float(sample_hash_combine(seed, 31u)));
+    } else if (debug_params.view == 47u) {
+        output_value = path_data_buffer[pixel_index].direct_diffuse.rgb * debug_params.scale;
+    } else if (debug_params.view == 48u) {
+        output_value = path_data_buffer[pixel_index].direct_specular.rgb * debug_params.scale;
+    } else if (debug_params.view == 49u) {
+        output_value = path_data_buffer[pixel_index].indirect_diffuse.rgb * debug_params.scale;
+    } else if (debug_params.view == 50u) {
+        output_value = path_data_buffer[pixel_index].indirect_specular.rgb * debug_params.scale;
+    } else if (debug_params.view == 51u) {
+        output_value = path_data_buffer[pixel_index].albedo_roughness_hit_confidence.rgb;
+    } else if (debug_params.view == 52u) {
+        PathDataRecord pathData = path_data_buffer[pixel_index];
+        output_value = vec3(
+            clamp(pathData.albedo_roughness_hit_confidence.w, 0.0, 1.0),
+            clamp(log2(pathData.direct_specular.a + 1.0) / 10.0, 0.0, 1.0),
+            clamp(pathData.indirect_diffuse.a, 0.0, 1.0));
     }
     imageStore(output_color, ivec2(pixel), vec4(output_value, 1.0));
 }

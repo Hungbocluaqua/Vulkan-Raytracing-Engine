@@ -902,7 +902,7 @@ Implementation notes:
 
 Goal: move denoising from generic color filtering toward path-aware diffuse/specular temporal filtering.
 
-### Phase 23: Expose Path Data
+### Phase 23: Expose Path Data [DONE]
 
 Target files:
 
@@ -925,7 +925,14 @@ Acceptance criteria:
 - No significant path tracing cost increase beyond the added writes.
 - Denoiser can consume the new channels without changing visual output yet.
 
-### Phase 24: Roughness-Aware Kernel Sizing
+Implementation notes:
+
+- Added a compact path-data storage buffer with direct diffuse, direct specular, indirect diffuse, indirect specular, albedo, roughness, hit distance, and confidence metadata.
+- Path tracing writes the path-data buffer at render resolution, and both the render graph and denoiser descriptor layouts now declare the buffer dependency.
+- Added debug views for path direct diffuse/specular, path indirect diffuse/specular, path albedo, and path metrics.
+- Verified Debug build plus beauty, path-direct-diffuse, path-direct-specular, path-indirect-diffuse, path-data-albedo, and path-data-metrics smoke runs.
+
+### Phase 24: Roughness-Aware Kernel Sizing [DONE]
 
 Target files:
 
@@ -942,6 +949,12 @@ Acceptance criteria:
 
 - Sharp specular detail is preserved better.
 - Diffuse noise still reduces effectively.
+
+Implementation notes:
+
+- The denoiser now derives a per-pixel spatial filter radius from first-hit roughness and variance, keeping low-roughness pixels on the smaller kernel while allowing noisy/high-roughness regions to use the wider kernel.
+- Added the `denoiser-kernel-radius` debug view and exposed it through CLI parsing and the editor debug view list.
+- Verified Debug build plus a `denoiser-kernel-radius` smoke run.
 
 ### Phase 25: Hit-Distance Filtering
 
@@ -2343,9 +2356,9 @@ Batch 4 validation details:
 
 Execution order:
 
-1. Implement Phase 23 path data outputs without changing denoiser behavior.
-2. Add debug views for every path data channel.
-3. Implement Phase 24 roughness-aware kernel sizing.
+1. [DONE] Implement Phase 23 path data outputs without changing denoiser behavior.
+2. [DONE] Add debug views for every path data channel.
+3. [DONE] Implement Phase 24 roughness-aware kernel sizing.
 4. Implement Phase 25 hit-distance filtering.
 5. Implement Phase 26 virtual motion for specular behind a conservative flag.
 6. Implement Phase 27 split histories only after diffuse/specular channel confidence is reliable.
