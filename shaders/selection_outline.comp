@@ -25,20 +25,6 @@ bool selected_at(ivec2 p) {
     return id == selection.selected_instance;
 }
 
-bool filled_selected_at(ivec2 p) {
-    if (selected_at(p)) {
-        return true;
-    }
-
-    uint count = 0u;
-    for (int y = -2; y <= 2; ++y) {
-        for (int x = -2; x <= 2; ++x) {
-            count += selected_at(p + ivec2(x, y)) ? 1u : 0u;
-        }
-    }
-    return count >= 18u;
-}
-
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(selection.width) || p.y >= int(selection.height)) {
@@ -48,11 +34,11 @@ void main() {
         return;
     }
 
-    bool center = filled_selected_at(p);
-    bool left = filled_selected_at(p + ivec2(-1, 0));
-    bool right = filled_selected_at(p + ivec2(1, 0));
-    bool up = filled_selected_at(p + ivec2(0, -1));
-    bool down = filled_selected_at(p + ivec2(0, 1));
+    bool center = selected_at(p);
+    bool left   = selected_at(p + ivec2(-1, 0));
+    bool right  = selected_at(p + ivec2(1, 0));
+    bool up     = selected_at(p + ivec2(0, -1));
+    bool down   = selected_at(p + ivec2(0, 1));
     bool nearSelected = left || right || up || down;
     bool edge = center ? !(left && right && up && down) : nearSelected;
     if (!edge) {
