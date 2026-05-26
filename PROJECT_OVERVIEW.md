@@ -2,9 +2,9 @@
 
 This document summarizes the current structure and architecture of the native Vulkan renderer in `native/vulkan`.
 
-The project is a C++20 / Vulkan 1.3 path-tracing renderer and editor. It builds a native Windows executable named `rtvulkan` and currently supports a Vulkan KHR hardware ray tracing path, a legacy compute path tracing backend, glTF/GLB scene loading, HDR environment maps, progressive accumulation, temporal/spatial denoising, TAA, histogram auto exposure, compute tone mapping, selection outlines, ImGui editor panels, GPU timing, and renderer debug views.
+The project is a C++20 / Vulkan 1.3 path-tracing renderer and editor. It builds a native Windows executable named `rtvulkan` and currently supports a Vulkan KHR hardware ray tracing path, glTF/GLB scene loading, HDR environment maps, progressive accumulation, temporal/spatial denoising, TAA, histogram auto exposure, compute tone mapping, selection outlines, ImGui editor panels, GPU timing, and renderer debug views.
 
-The renderer is operational, but it is still in stabilization. Current development is focused on the hardware ray tracing backend and editor-scene synchronization. The compute backend remains available for legacy fallback and comparison, but new renderer work should target hardware RT unless it is explicitly fixing legacy compute behavior.
+The renderer is operational, but it is still in stabilization. Current development is focused on the hardware ray tracing backend and editor-scene synchronization.
 
 ## Repository Shape
 
@@ -17,7 +17,7 @@ Important top-level files and directories:
 - `include/rtv/`: public/internal C++ headers for renderer modules.
 - `src/rtv/`: C++ implementation files.
 - `src/main.cpp`: executable entry point and CLI parsing.
-- `shaders/`: GLSL legacy compute, fullscreen, and hardware ray tracing shaders.
+- `shaders/`: GLSL compute post-process, fullscreen, and hardware ray tracing shaders.
 - `build/`: local CMake build directory.
 - `Sponza/`: local sample scene assets.
 - `citrus_orchard_road_puresky_4k.hdr`: local HDR environment asset.
@@ -71,7 +71,6 @@ Supported options include:
 - `--debug-view <name>`: start in a specific renderer debug view.
 - `--gltf <path>`: load a glTF/GLB scene.
 - `--hdr <path>`: load an HDR environment map.
-- `--backend compute|auto|rt`: choose the renderer backend.
 
 After parsing, `main()` constructs `rtv::Application` and calls `run()`.
 
@@ -399,7 +398,7 @@ It also owns:
 - Hardware ray tracing mesh build inputs.
 - Hardware ray tracing instance build inputs.
 
-The compute and hardware RT backends share much of this scene data. Hardware RT is now the primary renderer path, while compute is retained as legacy support and a useful comparison point.
+This scene data feeds the hardware RT renderer and the post-processing passes.
 
 Lighting note: GPU light records are built from emissive mesh/sphere geometry and authored scene lights. Directional, point, and area lights are merged into the same light-record selection table as emissive geometry; sun and environment lighting remain separate shader paths.
 
@@ -428,7 +427,6 @@ It owns:
 - Descriptor layout cache.
 - Pipeline cache.
 - Shader modules.
-- Legacy compute path tracing pipeline.
 - Denoiser compute pipeline.
 - Fullscreen graphics pipeline.
 - Hardware ray tracing pipeline.
@@ -445,7 +443,7 @@ Main frame flow:
 
 1. Begin the frame and update camera/settings uniforms.
 2. Transition the raw output image for shader writes.
-3. Run path tracing through the selected backend, normally hardware RT.
+3. Run path tracing through hardware RT.
 4. Barrier path tracing outputs for denoiser reads.
 5. Run temporal/spatial denoising if enabled.
 6. Run TAA if enabled and update temporal history.
@@ -471,41 +469,10 @@ Accumulation resets when relevant state changes:
 - Scene change.
 - Material change.
 - Shader reload.
-- Backend change.
 
-## Renderer Backends
+## Renderer Backend
 
-The renderer supports three backend modes:
-
-- `HardwareRayTracing`: require Vulkan KHR hardware RT and fail clearly if unsupported.
-- `Auto`: use hardware RT when available, otherwise compute.
-- `Compute`: use the legacy compute path tracer.
-
-Hardware RT is the active development target. Compute remains in the codebase for fallback, debugging, and historical comparison, but it should not drive new feature design.
-
-### Compute Backend
-
-The compute backend uses `shaders/pathtrace.comp`. It is a legacy backend.
-
-It performs:
-
-- Primary ray generation.
-- BVH/TLAS traversal.
-- Material evaluation.
-- Texture sampling.
-- Direct lighting.
-- Emissive lighting.
-- Environment lighting.
-- Environment importance sampling.
-- Multiple bounces.
-- MIS/PDF diagnostics.
-- Progressive accumulation.
-- Debug view output.
-- Denoiser auxiliary buffer output.
-
-It binds scene data directly as storage buffers, sampled images, samplers, and uniforms. Keep maintenance here conservative unless a change is needed for fallback correctness or shared data compatibility.
-
-### Hardware Ray Tracing Backend
+The renderer requires Vulkan KHR hardware ray tracing and fails clearly during startup when the selected device lacks the required extensions or features.
 
 The hardware RT backend uses:
 
@@ -541,7 +508,6 @@ The hardware RT descriptor set includes the TLAS and an RT triangle-material-ID 
 Shader files:
 
 - `demo_compute.comp`: simple compute demo.
-- `pathtrace.comp`: legacy compute path tracer.
 - `denoiser.comp`: temporal/spatial denoiser.
 - `taa.comp`: temporal anti-aliasing resolve and configurable sharpening.
 - `luminance_histogram.comp`: auto-exposure histogram builder.
@@ -558,7 +524,7 @@ Shader files:
 - `pathtrace_shadow.rmiss`: shadow miss shader.
 - `rt_common.glsl`: shared hardware RT shader declarations and helpers.
 
-The hardware RT shader set is the active renderer path. `pathtrace.comp` remains useful for comparison and fallback, but it is no longer the main visual reference.
+The hardware RT shader set is the renderer path.
 
 ## Denoising
 
@@ -712,7 +678,7 @@ Files can be dropped onto the window:
 - Denoising.
 - Fullscreen/presentation work.
 
-The renderer validation log records finer pass names, including hardware RT vs legacy compute tracing, auto-exposure histogram/reduce, tone map compute, selection outline, history copy, and editor viewport presentation.
+The renderer validation log records finer pass names, including hardware RT tracing, auto-exposure histogram/reduce, tone map compute, selection outline, history copy, and editor viewport presentation.
 
 The editor also exposes hardware RT stats:
 
@@ -741,7 +707,7 @@ The renderer is functional but not finished. The strongest parts of the architec
 - RAII resource wrappers.
 - Explicit Synchronization2 barriers.
 - Shared GPU scene representation.
-- Hardware RT backend with legacy compute fallback.
+- Hardware RT backend.
 - Shader reflection-driven descriptor layout construction.
 - Editor request flow separated from immediate renderer mutation.
 - Undo/redo command stack for editor operations.
@@ -764,7 +730,7 @@ Main active or future work areas:
 
 ## Important Architectural Takeaway
 
-The project is not just a minimal Vulkan sample. It is a staged renderer/editor migration with a real scene pipeline, GPU scene abstraction, primary hardware ray tracing backend, legacy compute fallback, denoiser, debug tooling, and editor integration.
+The project is not just a minimal Vulkan sample. It is a staged renderer/editor migration with a real scene pipeline, GPU scene abstraction, hardware ray tracing backend, denoiser, debug tooling, and editor integration.
 
 The central data flow is:
 
@@ -776,10 +742,9 @@ CLI / editor input
     -> GpuScene
     -> PathTracerRenderer
     -> hardware RT backend
-       or legacy compute fallback
     -> denoiser
     -> fullscreen presentation
     -> ImGui editor overlay
 ```
 
-This separation lets the project continue improving editor features, scene import, GPU data layout, and backend-specific tracing without rewriting the full application shell.
+This separation lets the project continue improving editor features, scene import, GPU data layout, and renderer tracing without rewriting the full application shell.

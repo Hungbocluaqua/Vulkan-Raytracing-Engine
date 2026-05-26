@@ -805,7 +805,7 @@ void main() {
         // Hardware RT does not expose implementation TLAS traversal counters.
         output_value = unsupported_hardware_rt_debug_pattern(pixel, debug_params.view);
     } else if (debug_params.view == 16u) {
-        // The software traversal comparison view only applies to the compute backend.
+        // The software traversal comparison view is unavailable in the hardware RT-only renderer.
         output_value = unsupported_hardware_rt_debug_pattern(pixel, debug_params.view);
     } else if (debug_params.view == 17u) {
         output_value = vec3(clamp(log2(max(components.first_light_pdf, 0.0) + 1.0) / 8.0, 0.0, 1.0));

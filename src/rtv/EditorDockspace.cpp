@@ -219,7 +219,7 @@ void EditorDockspace::drawHelpWindows() {
     if (showRendererInfo_) {
         ImGui::SetNextWindowSize(ImVec2(420.0f, 160.0f), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Renderer Info", &showRendererInfo_)) {
-            ImGui::TextUnformatted("Compute path tracing, temporal denoising, debug views, glTF loading, HDR environments, and GPU profiling are owned by the existing renderer.");
+            ImGui::TextUnformatted("Hardware RT path tracing, temporal denoising, debug views, glTF loading, HDR environments, and GPU profiling are owned by the existing renderer.");
             ImGui::TextUnformatted("The editor layer submits requests and displays renderer state without replacing the render pipeline.");
         }
         ImGui::End();
